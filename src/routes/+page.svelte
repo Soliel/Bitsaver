@@ -10,9 +10,15 @@
 	<div class="rounded-lg bg-gradient-to-r from-blue-600 to-indigo-700 p-6 text-white shadow-lg">
 		<h2 class="text-2xl font-bold">Welcome to BitSaver</h2>
 		<p class="mt-2 text-blue-100">
-			Your Teamcraft-style crafting assistant for Bitcraft. Track recipes, manage inventory, and
-			plan your crafting.
+			Your crafting assistant for Bitcraft. Create a list to start tracking recipes and planning
+			your crafting.
 		</p>
+		<a
+			href="/lists"
+			class="mt-4 inline-flex items-center gap-2 rounded-lg bg-white/20 px-4 py-2 font-medium text-white backdrop-blur hover:bg-white/30"
+		>
+			Get Started
+		</a>
 	</div>
 
 	<!-- Status Cards -->

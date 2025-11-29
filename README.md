@@ -1,38 +1,53 @@
-# sv
+# BitSaver
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+A crafting assistant for [Bitcraft](https://bitcraftonline.com/). Create crafting lists, track recipes, and manage your inventory.
 
-## Creating a project
+## Features
 
-If you're seeing this, you've probably already done this step. Congrats!
+- **Crafting Lists** - Create and manage lists of items you want to craft
+- **Recipe Browser** - Browse all craftable items and their recipes
+- **Inventory Sync** - Connect to Bitjita API to track your in-game inventory
+- **Material Calculator** - Automatically calculates required materials for recipes
 
-```sh
-# create a new project in the current directory
-npx sv create
+## Tech Stack
 
-# create a new project in my-app
-npx sv create my-app
-```
+- [SvelteKit](https://kit.svelte.dev/) with Svelte 5
+- [Tailwind CSS](https://tailwindcss.com/) v4
+- [IndexedDB](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API) for client-side storage
+- Deployed on [Vercel](https://vercel.com/)
 
-## Developing
+## Development
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+```bash
+# Install dependencies
+npm install
 
-```sh
+# Start dev server
 npm run dev
 
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
+# Type check
+npm run check
 
-## Building
-
-To create a production version of your app:
-
-```sh
+# Build for production
 npm run build
 ```
 
-You can preview the production build with `npm run preview`.
+## Project Structure
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+```
+src/
+├── lib/
+│   ├── components/    # Reusable UI components
+│   ├── services/      # API clients and external services
+│   └── state/         # Svelte 5 runes-based state management
+├── routes/
+│   ├── items/         # Item browser
+│   ├── lists/         # Crafting lists
+│   ├── inventory/     # Inventory viewer
+│   └── settings/      # App settings
+└── static/            # Static assets (icons, game data)
+```
+
+## API
+
+BitSaver uses the [Bitjita](https://bitjita.com/) API to fetch player inventories and claim data.

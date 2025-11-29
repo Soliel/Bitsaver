@@ -3,10 +3,8 @@
  * Rate limit: 250 requests per minute
  */
 
-import { dev } from '$app/environment';
-
-// Use proxy in development to avoid CORS issues
-const API_BASE = dev ? '/api/bitjita' : 'https://bitjita.com/api';
+// Always use server-side proxy to avoid CORS issues
+const API_BASE = '/api/bitjita';
 const APP_IDENTIFIER = 'bitsaver';
 
 // Rate limiting configuration

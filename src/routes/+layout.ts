@@ -1,5 +1,5 @@
-// Enable prerendering for static site generation
-export const prerender = true;
+// Disable prerendering since we have dynamic server routes
+export const prerender = false;
 
-// Disable SSR since this is a static app with client-side state
+// Disable SSR since this is a client-side app with client-side state
 export const ssr = false;
