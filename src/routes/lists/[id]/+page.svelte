@@ -8,7 +8,9 @@
 		updateListSources,
 		updateListAutoRefresh,
 		calculateListRequirements,
-		groupRequirementsByStep
+		groupRequirementsByStep,
+		groupRequirementsByProfession,
+		groupRequirementsByStepWithProfessions
 	} from '$lib/state/crafting.svelte';
 	import {
 		inventory,
@@ -24,9 +26,11 @@
 		findRecipesForItem
 	} from '$lib/state/game-data.svelte';
 	import { addItemToList } from '$lib/state/crafting.svelte';
+	import { getListProgress, saveListProgress } from '$lib/services/cache';
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import RecipePopover from '$lib/components/RecipePopover.svelte';
-	import type { MaterialRequirement, StepGroup } from '$lib/types/app';
+	import HaveBreakdownTooltip from '$lib/components/HaveBreakdownTooltip.svelte';
+	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode } from '$lib/types/app';
 
 	// Get list from URL param
 	const listId = $derived($page.params.id);
@@ -39,15 +43,38 @@
 	// Material requirements state
 	let requirements = $state<MaterialRequirement[]>([]);
 	let stepGroups = $state<StepGroup[]>([]);
+	let professionGroups = $state<ProfessionGroup[]>([]);
+	let combinedGroups = $state<StepWithProfessionsGroup[]>([]);
 	let isCalculating = $state(false);
 
 	// Display options
+	let viewMode = $state<ListViewMode>('step');
 	let hideCompleted = $state(false);
 	let collapsedSections = $state<Set<string>>(new Set());
 
 	// Manual tracking: user-entered "have" quantities and checked-off items
 	let manualHave = $state<Map<number, number>>(new Map()); // itemId -> manual quantity
 	let checkedOff = $state<Set<number>>(new Set()); // itemId -> manually marked complete
+
+	// Progress persistence
+	let progressLoaded = $state(false);
+	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	function scheduleProgressSave() {
+		if (!listId || !progressLoaded) return;
+		if (saveTimeout) clearTimeout(saveTimeout);
+		saveTimeout = setTimeout(async () => {
+			await saveListProgress({
+				listId,
+				manualHave: Array.from(manualHave.entries()),
+				checkedOff: Array.from(checkedOff),
+				hideCompleted,
+				viewMode,
+				collapsedSections: Array.from(collapsedSections),
+				updatedAt: Date.now()
+			});
+		}, 500);
+	}
 
 	function getManualHave(itemId: number): number | undefined {
 		return manualHave.get(itemId);
@@ -63,6 +90,9 @@
 			newMap.set(itemId, qty);
 		}
 		manualHave = newMap;
+
+		// Save progress
+		scheduleProgressSave();
 
 		// Debounce recalculation to avoid excessive calls while typing
 		if (recalcTimeout) clearTimeout(recalcTimeout);
@@ -83,6 +113,8 @@
 			newSet.add(itemId);
 		}
 		checkedOff = newSet;
+		// Save progress
+		scheduleProgressSave();
 		// Recalculate to propagate check-off through the tree
 		calculateRequirements();
 	}
@@ -100,23 +132,51 @@
 	}
 
 	// Filter step groups to exclude final items and apply hide completed
+	// Helper to filter materials
+	function filterMaterials(materials: MaterialRequirement[], listItemIds: Set<number>): MaterialRequirement[] {
+		let filtered = materials.filter((mat) => !listItemIds.has(mat.itemId));
+		if (hideCompleted) {
+			filtered = filtered.filter((m) => !isEffectivelyComplete(m));
+		}
+		return filtered;
+	}
+
 	const filteredStepGroups = $derived.by(() => {
 		const listItemIds = new Set(list?.items.map((i) => i.itemId) || []);
 
 		return stepGroups
-			.map((group) => {
-				// Filter out final items and optionally completed items
-				let materials = group.materials.filter((mat) => !listItemIds.has(mat.itemId));
-				if (hideCompleted) {
-					materials = materials.filter((m) => !isEffectivelyComplete(m));
-				}
+			.map((group) => ({
+				...group,
+				materials: filterMaterials(group.materials, listItemIds)
+			}))
+			.filter((group) => group.materials.length > 0);
+	});
 
-				return {
-					...group,
-					materials
-				};
-			})
-			.filter((group) => group.materials.length > 0); // Remove empty groups
+	const filteredProfessionGroups = $derived.by(() => {
+		const listItemIds = new Set(list?.items.map((i) => i.itemId) || []);
+
+		return professionGroups
+			.map((group) => ({
+				...group,
+				materials: filterMaterials(group.materials, listItemIds)
+			}))
+			.filter((group) => group.materials.length > 0);
+	});
+
+	const filteredCombinedGroups = $derived.by(() => {
+		const listItemIds = new Set(list?.items.map((i) => i.itemId) || []);
+
+		return combinedGroups
+			.map((stepGroup) => ({
+				...stepGroup,
+				professionGroups: stepGroup.professionGroups
+					.map((profGroup) => ({
+						...profGroup,
+						materials: filterMaterials(profGroup.materials, listItemIds)
+					}))
+					.filter((profGroup) => profGroup.materials.length > 0)
+			}))
+			.filter((stepGroup) => stepGroup.professionGroups.length > 0);
 	});
 
 	function toggleSection(section: string) {
@@ -127,10 +187,22 @@
 			newSet.add(section);
 		}
 		collapsedSections = newSet;
+		// Save progress
+		scheduleProgressSave();
 	}
 
 	function isSectionCollapsed(section: string): boolean {
 		return collapsedSections.has(section);
+	}
+
+	function setHideCompleted(value: boolean) {
+		hideCompleted = value;
+		scheduleProgressSave();
+	}
+
+	function setViewMode(mode: ListViewMode) {
+		viewMode = mode;
+		scheduleProgressSave();
 	}
 
 	// Item search for adding
@@ -151,13 +223,30 @@
 			// Initialize selected sources from list
 			selectedSourceIds = [...list.enabledSourceIds];
 
+			// Load saved progress from IndexedDB
+			loadProgress();
+
 			// Auto-sync if stale
 			handleAutoSync();
-
-			// Calculate requirements
-			calculateRequirements();
 		}
 	});
+
+	async function loadProgress() {
+		if (!listId) return;
+
+		const progress = await getListProgress(listId);
+		if (progress) {
+			manualHave = new Map(progress.manualHave);
+			checkedOff = new Set(progress.checkedOff);
+			hideCompleted = progress.hideCompleted;
+			viewMode = progress.viewMode;
+			collapsedSections = new Set(progress.collapsedSections);
+		}
+
+		progressLoaded = true;
+		// Calculate requirements after loading progress
+		calculateRequirements();
+	}
 
 	// Recalculate when list items change
 	$effect(() => {
@@ -212,6 +301,8 @@
 		try {
 			requirements = await calculateListRequirements(list.id, manualHave, checkedOff);
 			stepGroups = groupRequirementsByStep(requirements);
+			professionGroups = groupRequirementsByProfession(requirements);
+			combinedGroups = groupRequirementsByStepWithProfessions(requirements);
 		} catch (e) {
 			console.error('Failed to calculate requirements:', e);
 		} finally {
@@ -511,9 +602,9 @@
 		</div>
 
 		<!-- Options bar -->
-		<div class="flex items-center gap-4">
+		<div class="flex items-center justify-between gap-4">
 			<button
-				onclick={() => (hideCompleted = !hideCompleted)}
+				onclick={() => setHideCompleted(!hideCompleted)}
 				class="flex items-center gap-2 text-sm text-gray-300 hover:text-white"
 			>
 				<span>Hide completed</span>
@@ -529,6 +620,34 @@
 					></div>
 				</div>
 			</button>
+
+			<!-- View Mode Selector -->
+			<div class="flex items-center rounded-lg bg-gray-800 p-1">
+				<button
+					onclick={() => setViewMode('step')}
+					class="rounded-md px-3 py-1 text-sm transition-colors {viewMode === 'step'
+						? 'bg-blue-600 text-white'
+						: 'text-gray-400 hover:text-white'}"
+				>
+					Step
+				</button>
+				<button
+					onclick={() => setViewMode('profession')}
+					class="rounded-md px-3 py-1 text-sm transition-colors {viewMode === 'profession'
+						? 'bg-blue-600 text-white'
+						: 'text-gray-400 hover:text-white'}"
+				>
+					Profession
+				</button>
+				<button
+					onclick={() => setViewMode('combined')}
+					class="rounded-md px-3 py-1 text-sm transition-colors {viewMode === 'combined'
+						? 'bg-blue-600 text-white'
+						: 'text-gray-400 hover:text-white'}"
+				>
+					Combined
+				</button>
+			</div>
 		</div>
 
 		<!-- Sync message -->
@@ -549,181 +668,233 @@
 						Calculating materials...
 					</div>
 				{:else}
-					<!-- STEP-BASED SECTIONS -->
-					{#each filteredStepGroups as group (group.step)}
-						{@const completedInGroup =
-							stepGroups
-								.find((g) => g.step === group.step)
-								?.materials.filter((m) => isEffectivelyComplete(m)).length || 0}
-						{@const totalInGroup =
-							stepGroups.find((g) => g.step === group.step)?.materials.length || 0}
-						{@const sectionId = `step-${group.step}`}
-						{@const headerColor =
-							group.step === 1
-								? 'bg-amber-900/50 hover:bg-amber-900/70'
-								: 'bg-blue-900/40 hover:bg-blue-900/60'}
-						{@const textColor = group.step === 1 ? 'text-amber-200' : 'text-blue-200'}
-						{@const iconColor = group.step === 1 ? 'text-amber-400' : 'text-blue-400'}
-						<div class="overflow-hidden rounded-lg bg-gray-800">
-							<button
-								type="button"
-								onclick={() => toggleSection(sectionId)}
-								class="flex w-full items-center justify-between {headerColor} px-4 py-2 text-left"
-							>
-								<div class="flex items-center gap-2">
-									<svg
-										class="h-4 w-4 {iconColor} transition-transform {isSectionCollapsed(sectionId)
-											? ''
-											: 'rotate-90'}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path
-											stroke-linecap="round"
-											stroke-linejoin="round"
-											stroke-width="2"
-											d="M9 5l7 7-7 7"
-										/>
-									</svg>
-									<span class="font-medium {textColor}"
-										>{group.label} ({group.materials.length} items)</span
-									>
-									{#if completedInGroup > 0}
-										<span class="text-xs text-green-400"
-											>{completedInGroup}/{totalInGroup} done</span
+					<!-- STEP VIEW -->
+					{#if viewMode === 'step'}
+						{#each filteredStepGroups as group (group.step)}
+							{@const completedInGroup =
+								stepGroups
+									.find((g) => g.step === group.step)
+									?.materials.filter((m) => isEffectivelyComplete(m)).length || 0}
+							{@const totalInGroup =
+								stepGroups.find((g) => g.step === group.step)?.materials.length || 0}
+							{@const sectionId = `step-${group.step}`}
+							{@const headerColor =
+								group.step === 1
+									? 'bg-amber-900/50 hover:bg-amber-900/70'
+									: 'bg-blue-900/40 hover:bg-blue-900/60'}
+							{@const textColor = group.step === 1 ? 'text-amber-200' : 'text-blue-200'}
+							{@const iconColor = group.step === 1 ? 'text-amber-400' : 'text-blue-400'}
+							<div class="overflow-hidden rounded-lg bg-gray-800">
+								<button
+									type="button"
+									onclick={() => toggleSection(sectionId)}
+									class="flex w-full items-center justify-between {headerColor} px-4 py-2 text-left"
+								>
+									<div class="flex items-center gap-2">
+										<svg
+											class="h-4 w-4 {iconColor} transition-transform {isSectionCollapsed(sectionId)
+												? ''
+												: 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
 										>
-									{/if}
-								</div>
-							</button>
-
-							{#if !isSectionCollapsed(sectionId)}
-								<div class="divide-y divide-gray-700">
-									{#each group.materials as mat, i (mat.itemId)}
-										{@const matIconUrl = mat.item ? getItemIconUrl(mat.item.iconAssetName) : null}
-										{@const effectiveHave = getEffectiveHave(mat)}
-										{@const isComplete = isEffectivelyComplete(mat)}
-										{@const prevTier = i > 0 ? group.materials[i - 1].tier : null}
-										<!-- Tier divider if tier changed -->
-										{#if prevTier !== null && mat.tier !== prevTier}
-											<div class="bg-gray-750 px-4 py-1 text-xs text-gray-500">
-												Tier {mat.tier}
-											</div>
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												stroke-width="2"
+												d="M9 5l7 7-7 7"
+											/>
+										</svg>
+										<span class="font-medium {textColor}"
+											>{group.label} ({group.materials.length} items)</span
+										>
+										{#if completedInGroup > 0}
+											<span class="text-xs text-green-400"
+												>{completedInGroup}/{totalInGroup} done</span
+											>
 										{/if}
-										<div
-											class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete
-												? 'opacity-50'
-												: ''}"
+									</div>
+								</button>
+
+								{#if !isSectionCollapsed(sectionId)}
+									<div class="divide-y divide-gray-700">
+										{#each group.materials as mat, i (mat.itemId)}
+											{@const matIconUrl = mat.item ? getItemIconUrl(mat.item.iconAssetName) : null}
+											{@const effectiveHave = getEffectiveHave(mat)}
+											{@const isComplete = isEffectivelyComplete(mat)}
+											{@const prevTier = i > 0 ? group.materials[i - 1].tier : null}
+											<!-- Tier divider if tier changed -->
+											{#if prevTier !== null && mat.tier !== prevTier}
+												<div class="bg-gray-750 px-4 py-1 text-xs text-gray-500">
+													Tier {mat.tier}
+												</div>
+											{/if}
+											{@render materialRow(mat, matIconUrl, effectiveHave, isComplete)}
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+
+					<!-- PROFESSION VIEW -->
+					{:else if viewMode === 'profession'}
+						{#each filteredProfessionGroups as group (group.profession)}
+							{@const completedInGroup =
+								professionGroups
+									.find((g) => g.profession === group.profession)
+									?.materials.filter((m) => isEffectivelyComplete(m)).length || 0}
+							{@const totalInGroup =
+								professionGroups.find((g) => g.profession === group.profession)?.materials.length || 0}
+							{@const sectionId = `prof-${group.profession}`}
+							<div class="overflow-hidden rounded-lg bg-gray-800">
+								<button
+									type="button"
+									onclick={() => toggleSection(sectionId)}
+									class="flex w-full items-center justify-between bg-emerald-900/40 hover:bg-emerald-900/60 px-4 py-2 text-left"
+								>
+									<div class="flex items-center gap-2">
+										<svg
+											class="h-4 w-4 text-emerald-400 transition-transform {isSectionCollapsed(sectionId)
+												? ''
+												: 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
 										>
-											<!-- Checkbox -->
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												stroke-width="2"
+												d="M9 5l7 7-7 7"
+											/>
+										</svg>
+										<span class="font-medium text-emerald-200"
+											>{group.profession} ({group.materials.length} items)</span
+										>
+										{#if completedInGroup > 0}
+											<span class="text-xs text-green-400"
+												>{completedInGroup}/{totalInGroup} done</span
+											>
+										{/if}
+									</div>
+								</button>
+
+								{#if !isSectionCollapsed(sectionId)}
+									<div class="divide-y divide-gray-700">
+										{#each group.materials as mat, i (mat.itemId)}
+											{@const matIconUrl = mat.item ? getItemIconUrl(mat.item.iconAssetName) : null}
+											{@const effectiveHave = getEffectiveHave(mat)}
+											{@const isComplete = isEffectivelyComplete(mat)}
+											{@const prevTier = i > 0 ? group.materials[i - 1].tier : null}
+											<!-- Tier divider if tier changed -->
+											{#if prevTier !== null && mat.tier !== prevTier}
+												<div class="bg-gray-750 px-4 py-1 text-xs text-gray-500">
+													Tier {mat.tier}
+												</div>
+											{/if}
+											{@render materialRow(mat, matIconUrl, effectiveHave, isComplete)}
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+
+					<!-- COMBINED VIEW (Step -> Profession) -->
+					{:else if viewMode === 'combined'}
+						{#each filteredCombinedGroups as stepGroup (stepGroup.step)}
+							{@const sectionId = `combined-step-${stepGroup.step}`}
+							{@const headerColor =
+								stepGroup.step === 1
+									? 'bg-amber-900/50 hover:bg-amber-900/70'
+									: 'bg-blue-900/40 hover:bg-blue-900/60'}
+							{@const textColor = stepGroup.step === 1 ? 'text-amber-200' : 'text-blue-200'}
+							{@const iconColor = stepGroup.step === 1 ? 'text-amber-400' : 'text-blue-400'}
+							<div class="overflow-hidden rounded-lg bg-gray-800">
+								<button
+									type="button"
+									onclick={() => toggleSection(sectionId)}
+									class="flex w-full items-center justify-between {headerColor} px-4 py-2 text-left"
+								>
+									<div class="flex items-center gap-2">
+										<svg
+											class="h-4 w-4 {iconColor} transition-transform {isSectionCollapsed(sectionId)
+												? ''
+												: 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												stroke-width="2"
+												d="M9 5l7 7-7 7"
+											/>
+										</svg>
+										<span class="font-medium {textColor}"
+											>{stepGroup.label} ({stepGroup.professionGroups.reduce((sum, pg) => sum + pg.materials.length, 0)} items)</span
+										>
+									</div>
+								</button>
+
+								{#if !isSectionCollapsed(sectionId)}
+									<div class="divide-y divide-gray-700">
+										{#each stepGroup.professionGroups as profGroup (profGroup.profession)}
+											{@const profSectionId = `combined-${stepGroup.step}-${profGroup.profession}`}
+											{@const completedInProf = profGroup.materials.filter((m) => isEffectivelyComplete(m)).length}
+											<!-- Profession sub-header -->
 											<button
 												type="button"
-												onclick={() => toggleCheckedOff(mat.itemId)}
-												class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(
-													mat.itemId
-												)
-													? 'border-green-500 bg-green-600'
-													: 'border-gray-500 hover:border-gray-400'}"
-												aria-label={isCheckedOff(mat.itemId)
-													? 'Unmark as complete'
-													: 'Mark as complete'}
+												onclick={() => toggleSection(profSectionId)}
+												class="flex w-full items-center gap-2 bg-gray-700/50 hover:bg-gray-700 px-6 py-1.5 text-left"
 											>
-												{#if isCheckedOff(mat.itemId)}
-													<svg
-														class="h-3 w-3 text-white"
-														fill="none"
-														stroke="currentColor"
-														viewBox="0 0 24 24"
+												<svg
+													class="h-3 w-3 text-emerald-400 transition-transform {isSectionCollapsed(profSectionId)
+														? ''
+														: 'rotate-90'}"
+													fill="none"
+													stroke="currentColor"
+													viewBox="0 0 24 24"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														stroke-width="2"
+														d="M9 5l7 7-7 7"
+													/>
+												</svg>
+												<span class="text-sm text-emerald-300"
+													>{profGroup.profession} ({profGroup.materials.length})</span
+												>
+												{#if completedInProf > 0}
+													<span class="text-xs text-green-400"
+														>{completedInProf}/{profGroup.materials.length} done</span
 													>
-														<path
-															stroke-linecap="round"
-															stroke-linejoin="round"
-															stroke-width="3"
-															d="M5 13l4 4L19 7"
-														/>
-													</svg>
 												{/if}
 											</button>
-											<!-- Icon + Name with Recipe Popover -->
-											<RecipePopover itemId={mat.itemId}>
-												<div class="flex w-full cursor-help items-center gap-3">
-													<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
-														{#if matIconUrl}
-															<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
-														{:else}
-															<span class="text-gray-500">?</span>
-														{/if}
-													</div>
-													<span class="flex-1 truncate text-sm text-white"
-														>{mat.item?.name || `Item #${mat.itemId}`}</span
-													>
-													{#if import.meta.env.DEV && mat.item?.materialCost !== undefined}
-														<span
-															class="w-12 flex-shrink-0 text-right text-xs text-green-400"
-															title="Material cost: {mat.item.materialCost.toFixed(2)}"
-															>{formatCost(mat.item.materialCost)}</span
-														>
+
+											{#if !isSectionCollapsed(profSectionId)}
+												{#each profGroup.materials as mat, i (mat.itemId)}
+													{@const matIconUrl = mat.item ? getItemIconUrl(mat.item.iconAssetName) : null}
+													{@const effectiveHave = getEffectiveHave(mat)}
+													{@const isComplete = isEffectivelyComplete(mat)}
+													{@const prevTier = i > 0 ? profGroup.materials[i - 1].tier : null}
+													<!-- Tier divider if tier changed -->
+													{#if prevTier !== null && mat.tier !== prevTier}
+														<div class="bg-gray-750 px-6 py-1 text-xs text-gray-500">
+															Tier {mat.tier}
+														</div>
 													{/if}
-													<span
-														class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
-														>x{formatQty(mat.baseRequired)}</span
-													>
-												</div>
-											</RecipePopover>
-											<!-- Have / Need / Remaining -->
-											<div class="flex flex-shrink-0 items-center gap-2 text-sm">
-												{#if mat.remaining < mat.baseRequired && !isComplete}
-													<span class="w-12 text-right text-xs text-orange-400 tabular-nums"
-														>({formatQty(mat.remaining)})</span
-													>
-												{/if}
-												<div
-													class="flex items-center overflow-hidden rounded-md border border-gray-600 bg-gray-900/50"
-												>
-													<input
-														type="number"
-														value={getManualHave(mat.itemId) ?? mat.have}
-														onchange={(e) =>
-															setManualHave(mat.itemId, parseInt(e.currentTarget.value) || 0)}
-														min="0"
-														class="w-16 [appearance:textfield] bg-transparent px-2 py-1 text-right text-sm text-white focus:bg-gray-800 focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-														title="Amount you have"
-													/>
-													<span class="px-1 text-gray-500">/</span>
-													<span
-														class="min-w-[3rem] px-2 py-1 text-left {isComplete
-															? 'text-green-400'
-															: effectiveHave > 0
-																? 'text-yellow-400'
-																: 'text-gray-400'}"
-													>
-														{formatQty(mat.baseRequired)}
-													</span>
-												</div>
-												<div class="h-5 w-5 flex-shrink-0">
-													{#if isComplete}
-														<svg
-															class="h-5 w-5 text-green-500"
-															fill="none"
-															stroke="currentColor"
-															viewBox="0 0 24 24"
-														>
-															<path
-																stroke-linecap="round"
-																stroke-linejoin="round"
-																stroke-width="2"
-																d="M5 13l4 4L19 7"
-															/>
-														</svg>
-													{/if}
-												</div>
-											</div>
-										</div>
-									{/each}
-								</div>
-							{/if}
-						</div>
-					{/each}
+													{@render materialRow(mat, matIconUrl, effectiveHave, isComplete)}
+												{/each}
+											{/if}
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+					{/if}
 				{/if}
 			{/if}
 
@@ -1182,4 +1353,125 @@
 			</div>
 		</div>
 	{/if}
+
+	<!-- Material Row Snippet -->
+	{#snippet materialRow(mat: MaterialRequirement, matIconUrl: string | null, effectiveHave: number, isComplete: boolean)}
+		<div
+			class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete
+				? 'opacity-50'
+				: ''}"
+		>
+			<!-- Checkbox -->
+			<button
+				type="button"
+				onclick={() => toggleCheckedOff(mat.itemId)}
+				class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(
+					mat.itemId
+				)
+					? 'border-green-500 bg-green-600'
+					: 'border-gray-500 hover:border-gray-400'}"
+				aria-label={isCheckedOff(mat.itemId)
+					? 'Unmark as complete'
+					: 'Mark as complete'}
+			>
+				{#if isCheckedOff(mat.itemId)}
+					<svg
+						class="h-3 w-3 text-white"
+						fill="none"
+						stroke="currentColor"
+						viewBox="0 0 24 24"
+					>
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							stroke-width="3"
+							d="M5 13l4 4L19 7"
+						/>
+					</svg>
+				{/if}
+			</button>
+			<!-- Icon + Name with Recipe Popover -->
+			<RecipePopover itemId={mat.itemId}>
+				<div class="flex w-full cursor-help items-center gap-3">
+					<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+						{#if matIconUrl}
+							<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
+						{:else}
+							<span class="text-gray-500">?</span>
+						{/if}
+					</div>
+					<span class="flex-1 truncate text-sm text-white"
+						>{mat.item?.name || `Item #${mat.itemId}`}</span
+					>
+					{#if import.meta.env.DEV && mat.item?.materialCost !== undefined}
+						<span
+							class="w-12 flex-shrink-0 text-right text-xs text-green-400"
+							title="Material cost: {mat.item.materialCost.toFixed(2)}"
+							>{formatCost(mat.item.materialCost)}</span
+						>
+					{/if}
+				</div>
+			</RecipePopover>
+			<HaveBreakdownTooltip
+				itemId={mat.itemId}
+				listSourceIds={list?.enabledSourceIds ?? []}
+				manualAmount={getManualHave(mat.itemId)}
+				isCheckedOff={isCheckedOff(mat.itemId)}
+				parentContributions={mat.parentContributions}
+			>
+				<span
+					class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
+					>x{formatQty(mat.baseRequired)}</span
+				>
+			</HaveBreakdownTooltip>
+			<!-- Have / Need / Remaining -->
+			<div class="flex flex-shrink-0 items-center gap-2 text-sm">
+				{#if mat.remaining < mat.baseRequired && !isComplete}
+					<span class="w-12 text-right text-xs text-orange-400 tabular-nums"
+						>({formatQty(mat.remaining)})</span
+					>
+				{/if}
+				<div
+					class="flex items-center overflow-hidden rounded-md border border-gray-600 bg-gray-900/50"
+				>
+					<input
+						type="number"
+						value={getManualHave(mat.itemId) ?? mat.have}
+						onchange={(e) =>
+							setManualHave(mat.itemId, parseInt(e.currentTarget.value) || 0)}
+						min="0"
+						class="w-16 [appearance:textfield] bg-transparent px-2 py-1 text-right text-sm text-white focus:bg-gray-800 focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+						title="Amount you have"
+					/>
+					<span class="px-1 text-gray-500">/</span>
+					<span
+						class="min-w-[3rem] px-2 py-1 text-left {isComplete
+							? 'text-green-400'
+							: effectiveHave > 0
+								? 'text-yellow-400'
+								: 'text-gray-400'}"
+					>
+						{formatQty(mat.baseRequired)}
+					</span>
+				</div>
+				<div class="h-5 w-5 flex-shrink-0">
+					{#if isComplete}
+						<svg
+							class="h-5 w-5 text-green-500"
+							fill="none"
+							stroke="currentColor"
+							viewBox="0 0 24 24"
+						>
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="2"
+								d="M5 13l4 4L19 7"
+							/>
+						</svg>
+					{/if}
+				</div>
+			</div>
+		</div>
+	{/snippet}
 {/if}

@@ -27,6 +27,13 @@ import {
 } from '$lib/services/api/inventory';
 import { settings, updateInventorySyncTime, isInventoryStale } from './settings.svelte';
 
+/**
+ * Convert a reactive proxy to a plain object for IndexedDB storage
+ */
+function toPlain<T>(obj: T): T {
+	return JSON.parse(JSON.stringify(obj));
+}
+
 // State container
 export const inventory = $state({
 	sources: [] as InventorySource[],
@@ -384,7 +391,7 @@ export async function toggleSource(sourceId: string): Promise<void> {
 	const source = inventory.sources.find((s) => s.id === sourceId);
 	if (source) {
 		source.enabled = !source.enabled;
-		await saveSource(source);
+		await saveSource(toPlain(source));
 	}
 }
 
@@ -395,7 +402,7 @@ export async function enableAllSources(): Promise<void> {
 	for (const source of inventory.sources) {
 		source.enabled = true;
 	}
-	await saveSources(inventory.sources);
+	await saveSources(toPlain(inventory.sources));
 }
 
 /**
@@ -405,7 +412,7 @@ export async function disableAllSources(): Promise<void> {
 	for (const source of inventory.sources) {
 		source.enabled = false;
 	}
-	await saveSources(inventory.sources);
+	await saveSources(toPlain(inventory.sources));
 }
 
 /**
@@ -418,7 +425,7 @@ export async function toggleClaimSources(claimId: string, enabled: boolean): Pro
 		source.enabled = enabled;
 	}
 
-	await saveSources(claimSources);
+	await saveSources(toPlain(claimSources));
 }
 
 /**

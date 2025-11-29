@@ -14,7 +14,11 @@ import { fetchManifest, loadAllGameData, DATA_LOADER_VERSION } from '$lib/servic
 // State container
 export const gameData = $state({
 	items: new Map<number, Item>(),
-	recipes: new Map<number, Recipe[]>(), // outputItemId -> recipes
+	recipes: new Map<number, Recipe[]>(), // outputItemId -> crafting recipes
+	extractionRecipes: new Map<number, Recipe[]>(), // outputItemId -> extraction recipes
+	cargoToSkill: new Map<number, string>(), // cargoId -> skill name (for tracing cargo to gathering skill)
+	itemToCargoSkill: new Map<number, string>(), // outputItemId -> skill name (for items derived from cargo)
+	itemFromListToSkill: new Map<number, string>(), // itemId -> skill name (for items inside item lists)
 	isLoading: false,
 	loadingProgress: 0,
 	error: null as string | null,
@@ -102,9 +106,13 @@ export async function initializeGameData(): Promise<void> {
 			if (cached && cached.items.size > 0) {
 				gameData.items = cached.items;
 				gameData.recipes = cached.recipes;
+				gameData.extractionRecipes = cached.extractionRecipes || new Map();
+				gameData.cargoToSkill = cached.cargoToSkill || new Map();
+				gameData.itemToCargoSkill = cached.itemToCargoSkill || new Map();
+				gameData.itemFromListToSkill = cached.itemFromListToSkill || new Map();
 				gameData.loadingProgress = 100;
 				gameData.isInitialized = true;
-				console.log(`Loaded ${cached.items.size} items and ${cached.recipes.size} recipe groups from cache`);
+				console.log(`Loaded ${cached.items.size} items, ${cached.recipes.size} crafting recipe groups, ${cached.extractionRecipes?.size || 0} extraction recipe groups, ${cached.cargoToSkill?.size || 0} cargo mappings, ${cached.itemToCargoSkill?.size || 0} item-cargo mappings, ${cached.itemFromListToSkill?.size || 0} item-list mappings from cache`);
 				return;
 			}
 		}
@@ -119,13 +127,17 @@ export async function initializeGameData(): Promise<void> {
 		// Update state
 		gameData.items = data.items;
 		gameData.recipes = data.recipes;
+		gameData.extractionRecipes = data.extractionRecipes;
+		gameData.cargoToSkill = data.cargoToSkill;
+		gameData.itemToCargoSkill = data.itemToCargoSkill;
+		gameData.itemFromListToSkill = data.itemFromListToSkill;
 
 		// Cache the data with hash (including loader version)
-		await cacheAllGameData(data.items, data.recipes, expectedHash);
+		await cacheAllGameData(data.items, data.recipes, data.extractionRecipes, data.cargoToSkill, data.itemToCargoSkill, data.itemFromListToSkill, expectedHash);
 		gameData.loadingProgress = 100;
 
 		gameData.isInitialized = true;
-		console.log(`Loaded ${data.items.size} items and ${data.recipes.size} recipe groups from JSON files`);
+		console.log(`Loaded ${data.items.size} items, ${data.recipes.size} crafting recipe groups, ${data.extractionRecipes.size} extraction recipe groups, ${data.cargoToSkill.size} cargo mappings, ${data.itemToCargoSkill.size} item-cargo mappings, ${data.itemFromListToSkill.size} item-list mappings from JSON files`);
 	} catch (e) {
 		gameData.error = e instanceof Error ? e.message : 'Failed to initialize game data';
 		console.error('Failed to initialize game data:', e);
@@ -154,14 +166,18 @@ export async function refreshGameData(): Promise<void> {
 		// Update state
 		gameData.items = data.items;
 		gameData.recipes = data.recipes;
+		gameData.extractionRecipes = data.extractionRecipes;
+		gameData.cargoToSkill = data.cargoToSkill;
+		gameData.itemToCargoSkill = data.itemToCargoSkill;
+		gameData.itemFromListToSkill = data.itemFromListToSkill;
 
 		// Cache with new hash (including loader version)
 		const versionedHash = `${manifest.hash}_v${DATA_LOADER_VERSION}`;
-		await cacheAllGameData(data.items, data.recipes, versionedHash);
+		await cacheAllGameData(data.items, data.recipes, data.extractionRecipes, data.cargoToSkill, data.itemToCargoSkill, data.itemFromListToSkill, versionedHash);
 		gameData.loadingProgress = 100;
 
 		gameData.isInitialized = true;
-		console.log(`Refreshed ${data.items.size} items and ${data.recipes.size} recipe groups`);
+		console.log(`Refreshed ${data.items.size} items, ${data.recipes.size} crafting recipe groups, ${data.extractionRecipes.size} extraction recipe groups, ${data.cargoToSkill.size} cargo mappings, ${data.itemToCargoSkill.size} item-cargo mappings, ${data.itemFromListToSkill.size} item-list mappings`);
 	} catch (e) {
 		gameData.error = e instanceof Error ? e.message : 'Failed to refresh game data';
 		console.error('Failed to refresh game data:', e);
@@ -187,12 +203,12 @@ export function getItemWithRecipes(itemId: number): ItemWithRecipes | undefined 
 	if (!item) return undefined;
 
 	const craftingRecipes = gameData.recipes.get(itemId) || [];
+	const extractionRecipes = gameData.extractionRecipes.get(itemId) || [];
 
-	// For now, we don't have extraction recipes or other data in the JSON
 	return {
 		...item,
 		craftingRecipes,
-		extractionRecipes: [],
+		extractionRecipes,
 		recipesUsingItem: [],
 		relatedSkills: []
 	};

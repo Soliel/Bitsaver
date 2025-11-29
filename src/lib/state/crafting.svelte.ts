@@ -3,9 +3,9 @@
  * Persisted to IndexedDB
  */
 
-import type { CraftingList, CraftingListItem, MaterialRequirement, TierGroup, StepGroup } from '$lib/types/app';
+import type { CraftingList, CraftingListItem, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution } from '$lib/types/app';
 import type { MaterialNode, FlatMaterial, Item, Recipe } from '$lib/types/game';
-import { getCachedLists, getCachedList, saveList, deleteList as deleteCachedList } from '$lib/services/cache';
+import { getCachedLists, getCachedList, saveList, deleteList as deleteCachedList, deleteListProgress } from '$lib/services/cache';
 import { gameData, getItemById, getItemWithRecipes } from './game-data.svelte';
 import { allocateMaterialsFromSources, getAggregatedInventoryForSources } from './inventory.svelte';
 
@@ -81,21 +81,49 @@ function clearListTreeCache(listId: string): void {
 }
 
 /**
+ * Result from computeRemainingNeeds
+ */
+interface ComputeRemainingNeedsResult {
+	needs: Map<number, { baseRequired: number; remaining: number }>;
+	parentContributions: Map<number, Array<{ parentItemId: number; parentQuantityUsed: number; coverage: number }>>;
+}
+
+/**
  * Compute remaining needs by propagating inventory through the tree
  * @param trees - Material trees to process
  * @param have - Map of itemId -> quantity you have
  * @param checkedOff - Set of itemIds that are manually marked complete
- * Returns: Map<itemId, { baseRequired, remaining }>
+ * Returns: needs map and parent contributions map
  */
 function computeRemainingNeeds(
 	trees: MaterialNode[],
 	have: Map<number, number>,
 	checkedOff?: Set<number>
-): Map<number, { baseRequired: number; remaining: number }> {
+): ComputeRemainingNeedsResult {
 	const needs = new Map<number, { baseRequired: number; remaining: number }>();
+	const parentContributions = new Map<number, Array<{ parentItemId: number; parentQuantityUsed: number; coverage: number }>>();
 
 	// Track how much inventory we've "used" across tree branches
 	const usedInventory = new Map<number, number>();
+
+	// Helper to record a parent's contribution to a child
+	function recordContribution(childItemId: number, parentItemId: number, parentQuantityUsed: number, coverage: number) {
+		if (coverage <= 0 || parentQuantityUsed <= 0) return;
+		const existing = parentContributions.get(childItemId) || [];
+		existing.push({ parentItemId, parentQuantityUsed, coverage });
+		parentContributions.set(childItemId, existing);
+	}
+
+	// Recursively record coverage for all descendants when an ancestor has full coverage
+	function recordCoverageForDescendants(node: MaterialNode, ancestorItemId: number, ancestorQuantityUsed: number) {
+		for (const child of node.children) {
+			recordContribution(child.item.id, ancestorItemId, ancestorQuantityUsed, child.quantity);
+			// Recurse to grandchildren
+			if (child.children.length > 0) {
+				recordCoverageForDescendants(child, ancestorItemId, ancestorQuantityUsed);
+			}
+		}
+	}
 
 	function traverse(node: MaterialNode, neededQuantity: number): void {
 		const itemId = node.item.id;
@@ -127,15 +155,48 @@ function computeRemainingNeeds(
 		existing.remaining += stillNeeded;
 		needs.set(itemId, existing);
 
-		// If we still need to craft/gather any, recurse to children
-		if (stillNeeded > 0 && node.children.length > 0 && node.recipeUsed) {
-			const craftCount = Math.ceil(stillNeeded / node.recipeUsed.outputQuantity);
+		// Handle children - track parent contributions
+		if (node.children.length > 0 && node.recipeUsed) {
 			const originalCraftCount = Math.ceil(node.quantity / node.recipeUsed.outputQuantity);
 
-			for (const child of node.children) {
-				// Calculate how many of this child we need based on craft count ratio
-				const childNeeded = Math.ceil(child.quantity * craftCount / originalCraftCount);
-				traverse(child, childNeeded);
+			if (stillNeeded > 0) {
+				// Partial coverage: recurse with reduced child needs
+				const craftCount = Math.ceil(stillNeeded / node.recipeUsed.outputQuantity);
+
+				for (const child of node.children) {
+					const childOriginal = child.quantity;
+					const childNeeded = Math.ceil(childOriginal * craftCount / originalCraftCount);
+					const childCoverage = childOriginal - childNeeded;
+
+					// Record partial coverage from this parent's inventory
+					if (childCoverage > 0 && useFromInventory > 0 && !isCheckedOff) {
+						recordContribution(child.item.id, itemId, useFromInventory, childCoverage);
+						// Also record coverage for grandchildren that won't be crafted
+						if (child.children.length > 0 && childCoverage > 0) {
+							// Calculate the portion of the child subtree that's covered
+							const coveredRatio = childCoverage / childOriginal;
+							recordPartialCoverageForDescendants(child, itemId, useFromInventory, coveredRatio);
+						}
+					}
+
+					traverse(child, childNeeded);
+				}
+			} else if (useFromInventory > 0 && !isCheckedOff) {
+				// Full coverage: record coverage for ALL descendants in subtree
+				recordCoverageForDescendants(node, itemId, useFromInventory);
+			}
+		}
+	}
+
+	// Record partial coverage for descendants based on coverage ratio
+	function recordPartialCoverageForDescendants(node: MaterialNode, ancestorItemId: number, ancestorQuantityUsed: number, coverageRatio: number) {
+		for (const child of node.children) {
+			const coverage = Math.floor(child.quantity * coverageRatio);
+			if (coverage > 0) {
+				recordContribution(child.item.id, ancestorItemId, ancestorQuantityUsed, coverage);
+				if (child.children.length > 0) {
+					recordPartialCoverageForDescendants(child, ancestorItemId, ancestorQuantityUsed, coverageRatio);
+				}
 			}
 		}
 	}
@@ -145,7 +206,7 @@ function computeRemainingNeeds(
 		traverse(tree, tree.quantity);
 	}
 
-	return needs;
+	return { needs, parentContributions };
 }
 
 // Getter for active list
@@ -225,6 +286,7 @@ export async function deleteList(listId: string): Promise<void> {
 
 	clearListTreeCache(listId);
 	await deleteCachedList(listId);
+	await deleteListProgress(listId);
 }
 
 /**
@@ -440,6 +502,95 @@ export async function calculateMaterialTree(
 const itemStepCache = new Map<number, number>();
 
 /**
+ * Cache for item profession calculations
+ */
+const itemProfessionCache = new Map<number, string>();
+
+/**
+ * Get the profession/skill for an item based on its cheapest recipe.
+ * For raw materials (step 1), uses the item's tag.
+ * For crafted items, uses the first level requirement's skill name.
+ * For cargo-derived items, uses the cargo source gathering skill.
+ */
+function getItemProfession(itemId: number): string {
+	// Check cache first
+	if (itemProfessionCache.has(itemId)) {
+		return itemProfessionCache.get(itemId)!;
+	}
+
+	const item = getItemById(itemId);
+	if (!item) {
+		itemProfessionCache.set(itemId, 'Unknown');
+		return 'Unknown';
+	}
+
+	// Check if this item is derived from cargo (e.g., Ferralith Ore Piece from Ferralith Ore Cargo)
+	// This takes priority over other methods to ensure cargo-derived items
+	// show their source gathering profession (Mining, etc.)
+	const cargoSourceSkill = gameData.itemToCargoSkill.get(itemId);
+	if (cargoSourceSkill) {
+		itemProfessionCache.set(itemId, cargoSourceSkill);
+		return cargoSourceSkill;
+	}
+
+	// Check if this item comes from an item list (e.g., Fish Oil from "Breezy Fin Darter Products")
+	// Item lists are produced by crafting recipes with a specific skill
+	const listSourceSkill = gameData.itemFromListToSkill.get(itemId);
+	if (listSourceSkill) {
+		itemProfessionCache.set(itemId, listSourceSkill);
+		return listSourceSkill;
+	}
+
+	// Get recipes for this item
+	const itemDetails = getItemWithRecipes(itemId);
+	const allRecipes = itemDetails?.craftingRecipes || [];
+
+	// Filter to valid recipes (same logic as getItemNaturalStep)
+	const validRecipes = allRecipes.filter(recipe => {
+		if (recipe.ingredients.length === 0) return false;
+		if (!recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+		if (item.tier === -1) return true;
+		return !recipe.ingredients.some(ing => {
+			const ingItem = getItemById(ing.itemId);
+			if (!ingItem || ingItem.tier === -1) return false;
+			return ingItem.tier > item.tier;
+		});
+	});
+
+	// No valid crafting recipes with Item inputs
+	if (validRecipes.length === 0) {
+		// Try extraction recipes first (for gathered/mined materials)
+		const extractionRecipes = itemDetails?.extractionRecipes || [];
+		if (extractionRecipes.length > 0 && extractionRecipes[0].levelRequirements?.[0]?.skillName) {
+			const profession = extractionRecipes[0].levelRequirements[0].skillName;
+			itemProfessionCache.set(itemId, profession);
+			return profession;
+		}
+
+		// Try related skills
+		const relatedSkills = itemDetails?.relatedSkills || [];
+		if (relatedSkills.length > 0 && relatedSkills[0].name) {
+			const profession = relatedSkills[0].name;
+			itemProfessionCache.set(itemId, profession);
+			return profession;
+		}
+
+		// Fall back to 'Gathering' for raw materials
+		itemProfessionCache.set(itemId, 'Gathering');
+		return 'Gathering';
+	}
+
+	// Sort by cost and pick cheapest recipe
+	const sortedRecipes = [...validRecipes].sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity));
+	const recipe = sortedRecipes[0];
+
+	// Get profession from level requirements
+	const profession = recipe.levelRequirements?.[0]?.skillName || recipe.craftingStationName || item.tag || 'Crafting';
+	itemProfessionCache.set(itemId, profession);
+	return profession;
+}
+
+/**
  * Calculate the natural step for an item based on its cheapest recipe.
  * Uses the defaultRecipeId (pre-computed cheapest recipe) for consistency
  * with material tree calculations.
@@ -518,7 +669,7 @@ function getNodeStep(node: MaterialNode): number {
 }
 
 /**
- * Flatten material tree to aggregated list with step information.
+ * Flatten material tree to aggregated list with step and profession information.
  * Includes ALL nodes (not just leaves), with step indicating crafting order.
  * Step is based on recipe structure, not current inventory state.
  */
@@ -528,6 +679,7 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 	function traverse(node: MaterialNode, isRoot: boolean = false): void {
 		// Use natural step based on recipe structure, not tree structure
 		const step = getItemNaturalStep(node.item.id);
+		const profession = getItemProfession(node.item.id);
 
 		// Skip the root node (it's the final craft, shown separately in UI)
 		if (!isRoot) {
@@ -542,7 +694,8 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 						item: node.item,
 						quantity: node.quantity,
 						tier: node.tier,
-						step: step
+						step: step,
+						profession: profession
 					},
 					minStep: step
 				});
@@ -601,7 +754,7 @@ export async function calculateListRequirements(
 	}
 
 	// Compute remaining needs by propagating inventory through the tree
-	const needs = computeRemainingNeeds(trees, have, checkedOff);
+	const { needs, parentContributions: rawContributions } = computeRemainingNeeds(trees, have, checkedOff);
 
 	// Flatten trees to get base info (step, item details)
 	const flatMaterials = new Map<number, FlatMaterial>();
@@ -615,6 +768,34 @@ export async function calculateListRequirements(
 				flatMaterials.set(mat.itemId, { ...mat });
 			}
 		}
+	}
+
+	// Aggregate parent contributions by parent item ID
+	function aggregateContributions(itemId: number): ParentContribution[] | undefined {
+		const contributions = rawContributions.get(itemId);
+		if (!contributions || contributions.length === 0) return undefined;
+
+		// Aggregate by parent item ID
+		const byParent = new Map<number, { parentQuantityUsed: number; coverage: number }>();
+		for (const c of contributions) {
+			const existing = byParent.get(c.parentItemId);
+			if (existing) {
+				// Take max of parentQuantityUsed (same inventory used), sum coverage
+				existing.parentQuantityUsed = Math.max(existing.parentQuantityUsed, c.parentQuantityUsed);
+				existing.coverage += c.coverage;
+			} else {
+				byParent.set(c.parentItemId, {
+					parentQuantityUsed: c.parentQuantityUsed,
+					coverage: c.coverage
+				});
+			}
+		}
+
+		return Array.from(byParent.entries()).map(([parentItemId, data]) => ({
+			parentItemId,
+			parentQuantityUsed: data.parentQuantityUsed,
+			coverage: data.coverage
+		}));
 	}
 
 	// Build final requirements
@@ -635,7 +816,8 @@ export async function calculateListRequirements(
 			baseRequired, // Full requirement (stable, from full tree)
 			remaining, // After propagation (what you still need)
 			have: effectiveHave, // Effective amount covered (including propagation)
-			isComplete: remaining === 0
+			isComplete: remaining === 0,
+			parentContributions: aggregateContributions(itemId)
 		});
 	}
 
@@ -684,6 +866,7 @@ export function groupRequirementsByTier(requirements: MaterialRequirement[]): Ti
 /**
  * Group material requirements by crafting step
  * Step 1 = raw materials (gathered), Step 2+ = crafted items
+ * Sorted by tier, then profession within each step
  */
 export function groupRequirementsByStep(requirements: MaterialRequirement[]): StepGroup[] {
 	const groups = new Map<number, MaterialRequirement[]>();
@@ -698,8 +881,11 @@ export function groupRequirementsByStep(requirements: MaterialRequirement[]): St
 	const result: StepGroup[] = [];
 
 	for (const [step, materials] of groups) {
-		// Sort by tier within step
-		materials.sort((a, b) => a.tier - b.tier);
+		// Sort by tier, then profession within step
+		materials.sort((a, b) => {
+			if (a.tier !== b.tier) return a.tier - b.tier;
+			return a.profession.localeCompare(b.profession);
+		});
 
 		const totalRequired = materials.reduce((sum, m) => sum + m.baseRequired, 0);
 		const totalAvailable = materials.reduce((sum, m) => sum + m.have, 0);
@@ -715,6 +901,112 @@ export function groupRequirementsByStep(requirements: MaterialRequirement[]): St
 	}
 
 	// Sort by step ascending (step 1 first)
+	result.sort((a, b) => a.step - b.step);
+
+	return result;
+}
+
+/**
+ * Group material requirements by profession
+ * Sorted by tier, then step within each profession
+ */
+export function groupRequirementsByProfession(requirements: MaterialRequirement[]): ProfessionGroup[] {
+	const groups = new Map<string, MaterialRequirement[]>();
+
+	for (const req of requirements) {
+		const profession = req.profession || 'Unknown';
+		const profReqs = groups.get(profession) || [];
+		profReqs.push(req);
+		groups.set(profession, profReqs);
+	}
+
+	const result: ProfessionGroup[] = [];
+
+	for (const [profession, materials] of groups) {
+		// Sort by tier, then step within profession
+		materials.sort((a, b) => {
+			if (a.tier !== b.tier) return a.tier - b.tier;
+			return a.step - b.step;
+		});
+
+		const totalRequired = materials.reduce((sum, m) => sum + m.baseRequired, 0);
+		const totalAvailable = materials.reduce((sum, m) => sum + m.have, 0);
+
+		result.push({
+			profession,
+			materials,
+			totalRequired,
+			totalAvailable,
+			isComplete: materials.every((m) => m.isComplete)
+		});
+	}
+
+	// Sort professions alphabetically
+	result.sort((a, b) => a.profession.localeCompare(b.profession));
+
+	return result;
+}
+
+/**
+ * Group material requirements by step, with profession sub-groups within each step
+ * For combined view mode
+ */
+export function groupRequirementsByStepWithProfessions(requirements: MaterialRequirement[]): StepWithProfessionsGroup[] {
+	const stepGroups = new Map<number, Map<string, MaterialRequirement[]>>();
+
+	for (const req of requirements) {
+		const step = req.step || 1;
+		const profession = req.profession || 'Unknown';
+
+		if (!stepGroups.has(step)) {
+			stepGroups.set(step, new Map());
+		}
+		const profGroups = stepGroups.get(step)!;
+
+		const profReqs = profGroups.get(profession) || [];
+		profReqs.push(req);
+		profGroups.set(profession, profReqs);
+	}
+
+	const result: StepWithProfessionsGroup[] = [];
+
+	for (const [step, profGroups] of stepGroups) {
+		const professionGroups: ProfessionGroup[] = [];
+
+		for (const [profession, materials] of profGroups) {
+			// Sort by tier within profession
+			materials.sort((a, b) => a.tier - b.tier);
+
+			const totalRequired = materials.reduce((sum, m) => sum + m.baseRequired, 0);
+			const totalAvailable = materials.reduce((sum, m) => sum + m.have, 0);
+
+			professionGroups.push({
+				profession,
+				materials,
+				totalRequired,
+				totalAvailable,
+				isComplete: materials.every((m) => m.isComplete)
+			});
+		}
+
+		// Sort professions alphabetically
+		professionGroups.sort((a, b) => a.profession.localeCompare(b.profession));
+
+		const allMaterials = professionGroups.flatMap(pg => pg.materials);
+		const totalRequired = allMaterials.reduce((sum, m) => sum + m.baseRequired, 0);
+		const totalAvailable = allMaterials.reduce((sum, m) => sum + m.have, 0);
+
+		result.push({
+			step,
+			label: step === 1 ? 'Gathering' : `Step ${step}`,
+			professionGroups,
+			totalRequired,
+			totalAvailable,
+			isComplete: allMaterials.every((m) => m.isComplete)
+		});
+	}
+
+	// Sort by step ascending
 	result.sort((a, b) => a.step - b.step);
 
 	return result;

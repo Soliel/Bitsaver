@@ -161,6 +161,7 @@ export interface FlatMaterial {
 	quantity: number;
 	tier: number;
 	step: number; // 1 = raw/gathered materials, 2+ = crafted from previous step
+	profession: string; // Profession/skill required to craft (e.g., "Woodcutting", "Carpentry")
 }
 
 // Pre-computed material costs data (from material_costs.json)

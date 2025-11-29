@@ -43,6 +43,15 @@ const RARITY_MULTIPLIER = {
 const MIN_COST = 1;
 const CONVERGENCE_THRESHOLD = 0.0001;
 
+// Very high penalty for package/unpack recipes so they're never selected as defaults
+const PACKAGE_UNPACK_PENALTY = 1e15;
+
+// Check if a recipe is a package or unpack recipe by name
+function isPackageOrUnpackRecipe(recipeName) {
+	if (!recipeName) return false;
+	return recipeName.includes('Package') || recipeName.includes('Unpack');
+}
+
 // Load and parse JSON file
 async function loadJson(filename) {
 	const filePath = join(GAME_DATA_DIR, filename);
@@ -138,6 +147,7 @@ async function generateMaterialCosts() {
 				}
 				recipesByOutput.get(output.item_id).push({
 					id: recipe.id,
+					name: recipe.name,
 					ingredients: (recipe.consumed_item_stacks || [])
 						.filter((i) => i.item_type === 'Item')
 						.map((i) => ({ itemId: i.item_id, quantity: i.quantity })),
@@ -331,7 +341,13 @@ async function generateMaterialCosts() {
 
 			if (!valid) continue;
 
-			const costPerItem = Math.max(MIN_COST, recipeCost / recipe.outputQuantity);
+			let costPerItem = Math.max(MIN_COST, recipeCost / recipe.outputQuantity);
+
+			// Apply massive penalty to package/unpack recipes so they're never selected as defaults
+			if (isPackageOrUnpackRecipe(recipe.name)) {
+				costPerItem *= PACKAGE_UNPACK_PENALTY;
+			}
+
 			recipeCosts.set(recipe.id, costPerItem);
 
 			if (costPerItem < minCost) {
@@ -420,7 +436,13 @@ async function generateMaterialCosts() {
 
 						if (!valid) continue;
 
-						const costPerItem = Math.max(MIN_COST, recipeCost / recipe.outputQuantity);
+						let costPerItem = Math.max(MIN_COST, recipeCost / recipe.outputQuantity);
+
+						// Apply massive penalty to package/unpack recipes so they're never selected as defaults
+						if (isPackageOrUnpackRecipe(recipe.name)) {
+							costPerItem *= PACKAGE_UNPACK_PENALTY;
+						}
+
 						recipeCosts.set(recipe.id, costPerItem);
 
 						if (costPerItem < minCost) {
@@ -453,6 +475,9 @@ async function generateMaterialCosts() {
 	}
 
 	// ===== PHASE 6: Handle item list references =====
+	// Item list reference items (e.g., "Breezy Fin Darter Products") have item_list_id != 0
+	// These items, when consumed, produce random items from the list
+	// We propagate the reference item's cost to items inside the list
 	console.log('\nPhase 6: Processing item list references...');
 	let itemListUpdates = 0;
 
@@ -462,53 +487,51 @@ async function generateMaterialCosts() {
 		const list = itemListMap.get(item.item_list_id);
 		if (!list) continue;
 
-		// Find highest probability possibility
-		let maxProb = 0;
-		let maxProbPossibility = null;
+		// Get the item list reference's cost (from crafting or other source)
+		const listItemCost = costs.get(item.id);
+		if (listItemCost === undefined || listItemCost === Infinity) continue;
 
+		// For each possibility in the list, distribute costs to items inside
 		for (const poss of list.possibilities || []) {
-			if (poss.probability > maxProb) {
-				maxProb = poss.probability;
-				maxProbPossibility = poss;
-			}
-		}
-
-		if (!maxProbPossibility) continue;
-
-		// Calculate base cost from highest probability items
-		let baseCost = 0;
-		for (const itemStack of maxProbPossibility.items || []) {
-			if (itemStack.item_type === 'Item') {
-				const itemCost = costs.get(itemStack.item_id) || MIN_COST;
-				baseCost += itemCost * itemStack.quantity;
-			}
-		}
-
-		if (baseCost < MIN_COST) continue;
-
-		// Update the item list reference item itself
-		if (baseCost < costs.get(item.id)) {
-			costs.set(item.id, baseCost);
-			sources.set(item.id, 'item_list');
-			itemListUpdates++;
-		}
-
-		// Update costs for items in lower probability possibilities
-		for (const poss of list.possibilities || []) {
-			if (poss === maxProbPossibility) continue;
 			if (poss.probability <= 0) continue;
 
-			const scaledCost = baseCost / poss.probability;
-			if (scaledCost < MIN_COST) continue;
+			// Calculate expected cost per "roll" of this possibility
+			// If probability is 0.5, you need ~2 rolls to get this possibility
+			// Each roll costs listItemCost
+			const expectedRollsNeeded = 1 / poss.probability;
+			const totalCostForPossibility = listItemCost * expectedRollsNeeded;
 
+			// Count total item quantity in this possibility to distribute cost
+			let totalQuantity = 0;
 			for (const itemStack of poss.items || []) {
 				if (itemStack.item_type === 'Item') {
-					const currentCost = costs.get(itemStack.item_id);
-					if (currentCost !== undefined && scaledCost < currentCost) {
-						costs.set(itemStack.item_id, scaledCost);
-						sources.set(itemStack.item_id, 'item_list');
-						itemListUpdates++;
-					}
+					totalQuantity += itemStack.quantity;
+				}
+			}
+
+			if (totalQuantity === 0) continue;
+
+			// Distribute cost proportionally to items based on quantity
+			const costPerUnit = totalCostForPossibility / totalQuantity;
+
+			for (const itemStack of poss.items || []) {
+				if (itemStack.item_type !== 'Item') continue;
+
+				// Each unit of this item costs costPerUnit
+				const itemCost = Math.max(MIN_COST, costPerUnit);
+				const currentCost = costs.get(itemStack.item_id);
+				const currentSource = sources.get(itemStack.item_id);
+
+				// Update if cost is lower, OR if cost is equal but source was just 'tier'
+				// (item_list is a more specific source than tier)
+				const shouldUpdate =
+					currentCost !== undefined &&
+					(itemCost < currentCost || (itemCost === currentCost && currentSource === 'tier'));
+
+				if (shouldUpdate) {
+					costs.set(itemStack.item_id, itemCost);
+					sources.set(itemStack.item_id, 'item_list');
+					itemListUpdates++;
 				}
 			}
 		}

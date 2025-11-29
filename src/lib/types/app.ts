@@ -25,12 +25,20 @@ export interface CraftingListItem {
 	addedAt: number;
 }
 
+// Tracks how much of an item's need is covered by having parent items
+export interface ParentContribution {
+	parentItemId: number;
+	parentQuantityUsed: number; // How many of the parent item contributed
+	coverage: number; // How many units of THIS item are covered
+}
+
 // Material requirement with inventory info
 export interface MaterialRequirement extends FlatMaterial {
 	baseRequired: number;  // Full tree amount (stable, assumes 0 inventory)
 	remaining: number;     // What still needs to be gathered/crafted (after propagation)
 	have: number;          // Current inventory + manual override
 	isComplete: boolean;   // remaining === 0
+	parentContributions?: ParentContribution[]; // Coverage from parent items in inventory
 }
 
 // Grouped materials by tier for display
@@ -50,6 +58,39 @@ export interface StepGroup {
 	totalRequired: number;
 	totalAvailable: number;
 	isComplete: boolean;
+}
+
+// Grouped materials by profession for display
+export interface ProfessionGroup {
+	profession: string;
+	materials: MaterialRequirement[]; // Sorted by tier, then step
+	totalRequired: number;
+	totalAvailable: number;
+	isComplete: boolean;
+}
+
+// Step group with profession sub-groups (for combined view)
+export interface StepWithProfessionsGroup {
+	step: number;
+	label: string;
+	professionGroups: ProfessionGroup[];
+	totalRequired: number;
+	totalAvailable: number;
+	isComplete: boolean;
+}
+
+// List view mode
+export type ListViewMode = 'step' | 'profession' | 'combined';
+
+// Per-list progress state (persisted separately from list data)
+export interface ListProgress {
+	listId: string; // Primary key, matches CraftingList.id
+	manualHave: [number, number][]; // Serialized Map<itemId, quantity>
+	checkedOff: number[]; // Serialized Set<itemId>
+	hideCompleted: boolean;
+	viewMode: ListViewMode;
+	collapsedSections: string[]; // Serialized Set<sectionId>
+	updatedAt: number;
 }
 
 // Player's accessible claim info
