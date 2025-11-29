@@ -1,0 +1,512 @@
+[
+  {
+    "secondary_knowledge_id": 100002,
+    "stats": [
+      {
+        "id": "MovementMultiplier",
+        "value": 0.0,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 85361069,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 922161738,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1179490605,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1848639773,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 481239285,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1595594410,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1374810712,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 2069857725,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 352936733,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1108478591,
+    "stats": [
+      {
+        "id": "MaxSatiation",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 247498648,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 865680811,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1396363569,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 745950734,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1698909790,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 637569088,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1544455467,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1496870093,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1193306099,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1296867343,
+    "stats": [
+      {
+        "id": "CookingPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1012505575,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 177204475,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 2141686838,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1954516355,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1941494853,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 76131923,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1897163274,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 848401975,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 982130286,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 565101671,
+    "stats": [
+      {
+        "id": "BuildingSpeed",
+        "value": 0.02,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 444086104,
+    "stats": [
+      {
+        "id": "MaxTeleportationEnergy",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1461712242,
+    "stats": [
+      {
+        "id": "Strength",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 852566284,
+    "stats": [
+      {
+        "id": "MaxHealth",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1259124032,
+    "stats": [
+      {
+        "id": "MaxStamina",
+        "value": 10.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1518877569,
+    "stats": [
+      {
+        "id": "Armor",
+        "value": 30.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1782288061,
+    "stats": [
+      {
+        "id": "Strength",
+        "value": 5.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 611825682,
+    "stats": [
+      {
+        "id": "MaxStamina",
+        "value": 5.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1172768232,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 464035781,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 2120594630,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 745935008,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 264186244,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1371791564,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 248120201,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1566203145,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1093946583,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1362603456,
+    "stats": [
+      {
+        "id": "ConstructionPower",
+        "value": 2.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 911886611,
+    "stats": [
+      {
+        "id": "MaxStamina",
+        "value": 20.0,
+        "is_pct": false
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1551712725,
+    "stats": [
+      {
+        "id": "CooldownMultiplier",
+        "value": 0.01,
+        "is_pct": true
+      }
+    ]
+  },
+  {
+    "secondary_knowledge_id": 1965541450,
+    "stats": [
+      {
+        "id": "Strength",
+        "value": 20.0,
+        "is_pct": false
+      }
+    ]
+  }
+]

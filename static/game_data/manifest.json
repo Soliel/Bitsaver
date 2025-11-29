@@ -1,0 +1,13 @@
+{
+  "version": "2025-11-28",
+  "hash": "f0808e8216986864",
+  "generatedAt": "2025-11-28T22:46:20.279Z",
+  "files": {
+    "item_desc.json": "9ca5c408512d300a",
+    "crafting_recipe_desc.json": "3f22fa18aee6dee7",
+    "skill_desc.json": "232060acebcf9ccb",
+    "tool_type_desc.json": "8a918533bf4a2e3a",
+    "building_type_desc.json": "6faf0db1bcabaea8",
+    "material_costs.json": "26abe0b86cd10280"
+  }
+}
