@@ -17,7 +17,7 @@
 		if (path.startsWith('/lists')) return 'Crafting Lists';
 		if (path.startsWith('/inventory')) return 'Inventory';
 		if (path.startsWith('/settings')) return 'Settings';
-		return 'BitHelper';
+		return 'BitSaver';
 	});
 </script>
 

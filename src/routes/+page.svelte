@@ -8,7 +8,7 @@
 <div class="mx-auto max-w-4xl space-y-6">
 	<!-- Welcome Section -->
 	<div class="rounded-lg bg-gradient-to-r from-blue-600 to-indigo-700 p-6 text-white shadow-lg">
-		<h2 class="text-2xl font-bold">Welcome to BitHelper</h2>
+		<h2 class="text-2xl font-bold">Welcome to BitSaver</h2>
 		<p class="mt-2 text-blue-100">
 			Your Teamcraft-style crafting assistant for Bitcraft. Track recipes, manage inventory, and
 			plan your crafting.

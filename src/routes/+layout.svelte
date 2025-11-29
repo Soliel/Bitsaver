@@ -26,7 +26,7 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>BitHelper - Bitcraft Crafting Helper</title>
+	<title>BitSaver - Bitcraft Crafting Helper</title>
 </svelte:head>
 
 {#if needsOnboarding}

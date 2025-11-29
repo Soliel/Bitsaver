@@ -11,6 +11,7 @@ export interface CraftingList {
 	description?: string;
 	items: CraftingListItem[];
 	enabledSourceIds: string[]; // Per-list inventory source selection
+	autoRefreshEnabled?: boolean; // Per-list auto-refresh toggle (undefined = true)
 	createdAt: number;
 	updatedAt: number;
 }

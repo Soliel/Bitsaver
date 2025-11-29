@@ -1,10 +1,28 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { crafting, removeItemFromList, updateItemQuantity, updateListSources, calculateListRequirements, groupRequirementsByStep } from '$lib/state/crafting.svelte';
-	import { inventory, syncIfStale, syncAllInventories, sourcesByClaim } from '$lib/state/inventory.svelte';
+	import {
+		crafting,
+		removeItemFromList,
+		updateItemQuantity,
+		updateListSources,
+		updateListAutoRefresh,
+		calculateListRequirements,
+		groupRequirementsByStep
+	} from '$lib/state/crafting.svelte';
+	import {
+		inventory,
+		syncIfStale,
+		syncAllInventories,
+		sourcesByClaim
+	} from '$lib/state/inventory.svelte';
 	import { settings } from '$lib/state/settings.svelte';
-	import { gameData, getItemById, searchItems, findRecipesForItem } from '$lib/state/game-data.svelte';
+	import {
+		gameData,
+		getItemById,
+		searchItems,
+		findRecipesForItem
+	} from '$lib/state/game-data.svelte';
 	import { addItemToList } from '$lib/state/crafting.svelte';
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import RecipePopover from '$lib/components/RecipePopover.svelte';
@@ -12,7 +30,7 @@
 
 	// Get list from URL param
 	const listId = $derived($page.params.id);
-	const list = $derived(crafting.lists.find(l => l.id === listId));
+	const list = $derived(crafting.lists.find((l) => l.id === listId));
 
 	// Inventory state
 	let isSyncing = $state(false);
@@ -83,20 +101,22 @@
 
 	// Filter step groups to exclude final items and apply hide completed
 	const filteredStepGroups = $derived.by(() => {
-		const listItemIds = new Set(list?.items.map(i => i.itemId) || []);
+		const listItemIds = new Set(list?.items.map((i) => i.itemId) || []);
 
-		return stepGroups.map(group => {
-			// Filter out final items and optionally completed items
-			let materials = group.materials.filter(mat => !listItemIds.has(mat.itemId));
-			if (hideCompleted) {
-				materials = materials.filter(m => !isEffectivelyComplete(m));
-			}
+		return stepGroups
+			.map((group) => {
+				// Filter out final items and optionally completed items
+				let materials = group.materials.filter((mat) => !listItemIds.has(mat.itemId));
+				if (hideCompleted) {
+					materials = materials.filter((m) => !isEffectivelyComplete(m));
+				}
 
-			return {
-				...group,
-				materials
-			};
-		}).filter(group => group.materials.length > 0); // Remove empty groups
+				return {
+					...group,
+					materials
+				};
+			})
+			.filter((group) => group.materials.length > 0); // Remove empty groups
 	});
 
 	function toggleSection(section: string) {
@@ -147,12 +167,15 @@
 	});
 
 	async function handleAutoSync() {
+		// Skip auto-sync if disabled for this list
+		if (list?.autoRefreshEnabled === false) return;
+
 		isSyncing = true;
 		try {
 			const didSync = await syncIfStale();
 			if (didSync) {
 				lastSyncMessage = 'Inventory synced automatically';
-				setTimeout(() => lastSyncMessage = null, 3000);
+				setTimeout(() => (lastSyncMessage = null), 3000);
 			}
 		} catch (e) {
 			console.error('Auto-sync failed:', e);
@@ -161,12 +184,18 @@
 		}
 	}
 
+	async function toggleAutoRefresh() {
+		if (!list) return;
+		const newValue = list.autoRefreshEnabled === false;
+		await updateListAutoRefresh(list.id, newValue);
+	}
+
 	async function handleManualSync() {
 		isSyncing = true;
 		try {
 			await syncAllInventories();
 			lastSyncMessage = 'Inventory refreshed';
-			setTimeout(() => lastSyncMessage = null, 3000);
+			setTimeout(() => (lastSyncMessage = null), 3000);
 			await calculateRequirements();
 		} catch (e) {
 			console.error('Manual sync failed:', e);
@@ -318,11 +347,11 @@
 	function toggleSource(sourceId: string) {
 		// If empty (meaning "all"), populate with all source IDs first
 		if (selectedSourceIds.length === 0) {
-			const allIds = inventory.sources.map(s => s.id);
+			const allIds = inventory.sources.map((s) => s.id);
 			// Remove the one being unchecked
-			selectedSourceIds = allIds.filter(id => id !== sourceId);
+			selectedSourceIds = allIds.filter((id) => id !== sourceId);
 		} else if (selectedSourceIds.includes(sourceId)) {
-			selectedSourceIds = selectedSourceIds.filter(id => id !== sourceId);
+			selectedSourceIds = selectedSourceIds.filter((id) => id !== sourceId);
 		} else {
 			selectedSourceIds = [...selectedSourceIds, sourceId];
 		}
@@ -330,7 +359,7 @@
 
 	function toggleAllSources(claimId: string, enable: boolean) {
 		const claimSources = sourcesByClaim.value.get(claimId) || [];
-		const claimSourceIds = claimSources.map(s => s.id);
+		const claimSourceIds = claimSources.map((s) => s.id);
 
 		if (enable) {
 			// If empty (all), just stay empty or add these
@@ -343,10 +372,10 @@
 		} else {
 			// If empty (meaning "all"), populate with all IDs first, then remove claim's sources
 			if (selectedSourceIds.length === 0) {
-				const allIds = inventory.sources.map(s => s.id);
-				selectedSourceIds = allIds.filter(id => !claimSourceIds.includes(id));
+				const allIds = inventory.sources.map((s) => s.id);
+				selectedSourceIds = allIds.filter((id) => !claimSourceIds.includes(id));
 			} else {
-				selectedSourceIds = selectedSourceIds.filter(id => !claimSourceIds.includes(id));
+				selectedSourceIds = selectedSourceIds.filter((id) => !claimSourceIds.includes(id));
 			}
 		}
 	}
@@ -377,7 +406,12 @@
 				<div class="flex items-center gap-2">
 					<a href="/lists" class="text-gray-400 hover:text-white" aria-label="Back to lists">
 						<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="2"
+								d="M15 19l-7-7 7-7"
+							/>
 						</svg>
 					</a>
 					<h2 class="text-xl font-semibold text-white">{list.name}</h2>
@@ -395,15 +429,46 @@
 				>
 					<span class="flex items-center gap-2">
 						<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="2"
+								d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
+							/>
 						</svg>
 						Inventory Sources
 						{#if list.enabledSourceIds.length > 0}
-							<span class="rounded-full bg-blue-600 px-2 py-0.5 text-xs">{list.enabledSourceIds.length}</span>
+							<span class="rounded-full bg-blue-600 px-2 py-0.5 text-xs"
+								>{list.enabledSourceIds.length}</span
+							>
 						{:else}
 							<span class="rounded-full bg-gray-600 px-2 py-0.5 text-xs">All</span>
 						{/if}
 					</span>
+				</button>
+
+				<!-- Auto-refresh Toggle -->
+				<button
+					onclick={toggleAutoRefresh}
+					class="flex items-center gap-2 rounded-lg bg-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-600"
+					title={list.autoRefreshEnabled !== false
+						? 'Auto-refresh enabled'
+						: 'Auto-refresh disabled'}
+				>
+					<span class="text-gray-400">Auto Refresh</span>
+					<div
+						class="relative h-5 w-9 rounded-full transition-colors {list.autoRefreshEnabled !==
+						false
+							? 'bg-blue-600'
+							: 'bg-gray-600'}"
+					>
+						<div
+							class="absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all {list.autoRefreshEnabled !==
+							false
+								? 'left-4'
+								: 'left-0.5'}"
+						></div>
+					</div>
 				</button>
 
 				<!-- Refresh Button -->
@@ -415,13 +480,20 @@
 				>
 					{#if isSyncing}
 						<span class="flex items-center gap-2">
-							<span class="h-4 w-4 animate-spin rounded-full border-2 border-gray-400 border-t-transparent"></span>
+							<span
+								class="h-4 w-4 animate-spin rounded-full border-2 border-gray-400 border-t-transparent"
+							></span>
 							Syncing...
 						</span>
 					{:else}
 						<span class="flex items-center gap-2">
 							<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									stroke-width="2"
+									d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+								/>
 							</svg>
 							Refresh
 						</span>
@@ -430,7 +502,7 @@
 
 				<!-- Add Item Button -->
 				<button
-					onclick={() => showAddModal = true}
+					onclick={() => (showAddModal = true)}
 					class="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
 				>
 					+ Add Item
@@ -440,14 +512,23 @@
 
 		<!-- Options bar -->
 		<div class="flex items-center gap-4">
-			<label class="flex cursor-pointer items-center gap-2 text-sm text-gray-300">
-				<input
-					type="checkbox"
-					bind:checked={hideCompleted}
-					class="h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500"
-				/>
-				Hide completed rows
-			</label>
+			<button
+				onclick={() => (hideCompleted = !hideCompleted)}
+				class="flex items-center gap-2 text-sm text-gray-300 hover:text-white"
+			>
+				<span>Hide completed</span>
+				<div
+					class="relative h-5 w-9 rounded-full transition-colors {hideCompleted
+						? 'bg-blue-600'
+						: 'bg-gray-600'}"
+				>
+					<div
+						class="absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all {hideCompleted
+							? 'left-4'
+							: 'left-0.5'}"
+					></div>
+				</div>
+			</button>
 		</div>
 
 		<!-- Sync message -->
@@ -462,16 +543,25 @@
 			{#if list.items.length > 0}
 				{#if isCalculating}
 					<div class="flex items-center gap-2 rounded-lg bg-gray-800 px-4 py-3 text-gray-400">
-						<span class="h-4 w-4 animate-spin rounded-full border-2 border-gray-400 border-t-transparent"></span>
+						<span
+							class="h-4 w-4 animate-spin rounded-full border-2 border-gray-400 border-t-transparent"
+						></span>
 						Calculating materials...
 					</div>
 				{:else}
 					<!-- STEP-BASED SECTIONS -->
 					{#each filteredStepGroups as group (group.step)}
-						{@const completedInGroup = stepGroups.find(g => g.step === group.step)?.materials.filter(m => isEffectivelyComplete(m)).length || 0}
-						{@const totalInGroup = stepGroups.find(g => g.step === group.step)?.materials.length || 0}
+						{@const completedInGroup =
+							stepGroups
+								.find((g) => g.step === group.step)
+								?.materials.filter((m) => isEffectivelyComplete(m)).length || 0}
+						{@const totalInGroup =
+							stepGroups.find((g) => g.step === group.step)?.materials.length || 0}
 						{@const sectionId = `step-${group.step}`}
-						{@const headerColor = group.step === 1 ? 'bg-amber-900/50 hover:bg-amber-900/70' : 'bg-blue-900/40 hover:bg-blue-900/60'}
+						{@const headerColor =
+							group.step === 1
+								? 'bg-amber-900/50 hover:bg-amber-900/70'
+								: 'bg-blue-900/40 hover:bg-blue-900/60'}
 						{@const textColor = group.step === 1 ? 'text-amber-200' : 'text-blue-200'}
 						{@const iconColor = group.step === 1 ? 'text-amber-400' : 'text-blue-400'}
 						<div class="overflow-hidden rounded-lg bg-gray-800">
@@ -482,14 +572,27 @@
 							>
 								<div class="flex items-center gap-2">
 									<svg
-										class="h-4 w-4 {iconColor} transition-transform {isSectionCollapsed(sectionId) ? '' : 'rotate-90'}"
-										fill="none" stroke="currentColor" viewBox="0 0 24 24"
+										class="h-4 w-4 {iconColor} transition-transform {isSectionCollapsed(sectionId)
+											? ''
+											: 'rotate-90'}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
 									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+										<path
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											stroke-width="2"
+											d="M9 5l7 7-7 7"
+										/>
 									</svg>
-									<span class="font-medium {textColor}">{group.label} ({group.materials.length} items)</span>
+									<span class="font-medium {textColor}"
+										>{group.label} ({group.materials.length} items)</span
+									>
 									{#if completedInGroup > 0}
-										<span class="text-xs text-green-400">{completedInGroup}/{totalInGroup} done</span>
+										<span class="text-xs text-green-400"
+											>{completedInGroup}/{totalInGroup} done</span
+										>
 									{/if}
 								</div>
 							</button>
@@ -503,27 +606,47 @@
 										{@const prevTier = i > 0 ? group.materials[i - 1].tier : null}
 										<!-- Tier divider if tier changed -->
 										{#if prevTier !== null && mat.tier !== prevTier}
-											<div class="px-4 py-1 text-xs text-gray-500 bg-gray-750">
+											<div class="bg-gray-750 px-4 py-1 text-xs text-gray-500">
 												Tier {mat.tier}
 											</div>
 										{/if}
-										<div class="flex items-center gap-3 px-4 py-2 hover:bg-gray-750 {isComplete ? 'opacity-50' : ''}">
+										<div
+											class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete
+												? 'opacity-50'
+												: ''}"
+										>
 											<!-- Checkbox -->
 											<button
 												type="button"
 												onclick={() => toggleCheckedOff(mat.itemId)}
-												class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(mat.itemId) ? 'border-green-500 bg-green-600' : 'border-gray-500 hover:border-gray-400'}"
-												aria-label={isCheckedOff(mat.itemId) ? 'Unmark as complete' : 'Mark as complete'}
+												class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(
+													mat.itemId
+												)
+													? 'border-green-500 bg-green-600'
+													: 'border-gray-500 hover:border-gray-400'}"
+												aria-label={isCheckedOff(mat.itemId)
+													? 'Unmark as complete'
+													: 'Mark as complete'}
 											>
 												{#if isCheckedOff(mat.itemId)}
-													<svg class="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+													<svg
+														class="h-3 w-3 text-white"
+														fill="none"
+														stroke="currentColor"
+														viewBox="0 0 24 24"
+													>
+														<path
+															stroke-linecap="round"
+															stroke-linejoin="round"
+															stroke-width="3"
+															d="M5 13l4 4L19 7"
+														/>
 													</svg>
 												{/if}
 											</button>
 											<!-- Icon + Name with Recipe Popover -->
 											<RecipePopover itemId={mat.itemId}>
-												<div class="flex w-full items-center gap-3 cursor-help">
+												<div class="flex w-full cursor-help items-center gap-3">
 													<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
 														{#if matIconUrl}
 															<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
@@ -531,39 +654,69 @@
 															<span class="text-gray-500">?</span>
 														{/if}
 													</div>
-													<span class="text-sm text-white truncate flex-1">{mat.item?.name || `Item #${mat.itemId}`}</span>
+													<span class="flex-1 truncate text-sm text-white"
+														>{mat.item?.name || `Item #${mat.itemId}`}</span
+													>
 													{#if import.meta.env.DEV && mat.item?.materialCost !== undefined}
-														<span class="w-12 flex-shrink-0 text-xs text-green-400 text-right" title="Material cost: {mat.item.materialCost.toFixed(2)}">{formatCost(mat.item.materialCost)}</span>
+														<span
+															class="w-12 flex-shrink-0 text-right text-xs text-green-400"
+															title="Material cost: {mat.item.materialCost.toFixed(2)}"
+															>{formatCost(mat.item.materialCost)}</span
+														>
 													{/if}
-													<span class="w-16 flex-shrink-0 text-sm text-blue-400 text-right tabular-nums">x{formatQty(mat.baseRequired)}</span>
+													<span
+														class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
+														>x{formatQty(mat.baseRequired)}</span
+													>
 												</div>
 											</RecipePopover>
 											<!-- Have / Need / Remaining -->
-											<div class="flex items-center gap-2 text-sm flex-shrink-0">
+											<div class="flex flex-shrink-0 items-center gap-2 text-sm">
 												{#if mat.remaining < mat.baseRequired && !isComplete}
-													<span class="text-xs text-orange-400 tabular-nums w-12 text-right">({formatQty(mat.remaining)})</span>
+													<span class="w-12 text-right text-xs text-orange-400 tabular-nums"
+														>({formatQty(mat.remaining)})</span
+													>
 												{/if}
-												<div class="flex items-center rounded-md bg-gray-900/50 border border-gray-600 overflow-hidden">
+												<div
+													class="flex items-center overflow-hidden rounded-md border border-gray-600 bg-gray-900/50"
+												>
 													<input
 														type="number"
 														value={getManualHave(mat.itemId) ?? mat.have}
-														onchange={(e) => setManualHave(mat.itemId, parseInt(e.currentTarget.value) || 0)}
+														onchange={(e) =>
+															setManualHave(mat.itemId, parseInt(e.currentTarget.value) || 0)}
 														min="0"
-														class="w-16 bg-transparent px-2 py-1 text-right text-sm text-white focus:outline-none focus:bg-gray-800 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+														class="w-16 [appearance:textfield] bg-transparent px-2 py-1 text-right text-sm text-white focus:bg-gray-800 focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 														title="Amount you have"
 													/>
 													<span class="px-1 text-gray-500">/</span>
-													<span class="px-2 py-1 min-w-[3rem] text-left {isComplete ? 'text-green-400' : effectiveHave > 0 ? 'text-yellow-400' : 'text-gray-400'}">
+													<span
+														class="min-w-[3rem] px-2 py-1 text-left {isComplete
+															? 'text-green-400'
+															: effectiveHave > 0
+																? 'text-yellow-400'
+																: 'text-gray-400'}"
+													>
 														{formatQty(mat.baseRequired)}
 													</span>
 												</div>
-												<div class="w-5 h-5 flex-shrink-0">
-												{#if isComplete}
-													<svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-													</svg>
-												{/if}
-											</div>
+												<div class="h-5 w-5 flex-shrink-0">
+													{#if isComplete}
+														<svg
+															class="h-5 w-5 text-green-500"
+															fill="none"
+															stroke="currentColor"
+															viewBox="0 0 24 24"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																stroke-width="2"
+																d="M5 13l4 4L19 7"
+															/>
+														</svg>
+													{/if}
+												</div>
 											</div>
 										</div>
 									{/each}
@@ -583,19 +736,32 @@
 						class="flex items-center gap-2 hover:text-white"
 					>
 						<svg
-							class="h-4 w-4 text-purple-400 transition-transform {isSectionCollapsed('items') ? '' : 'rotate-90'}"
-							fill="none" stroke="currentColor" viewBox="0 0 24 24"
+							class="h-4 w-4 text-purple-400 transition-transform {isSectionCollapsed('items')
+								? ''
+								: 'rotate-90'}"
+							fill="none"
+							stroke="currentColor"
+							viewBox="0 0 24 24"
 						>
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="2"
+								d="M9 5l7 7-7 7"
+							/>
 						</svg>
 						<span class="font-medium text-purple-200">Final Crafts ({list.items.length})</span>
-						{#if list.items.some(i => isCheckedOff(i.itemId) || (getManualHave(i.itemId) ?? 0) >= i.quantity)}
-							<span class="text-xs text-green-400">{list.items.filter(i => isCheckedOff(i.itemId) || (getManualHave(i.itemId) ?? 0) >= i.quantity).length}/{list.items.length} done</span>
+						{#if list.items.some((i) => isCheckedOff(i.itemId) || (getManualHave(i.itemId) ?? 0) >= i.quantity)}
+							<span class="text-xs text-green-400"
+								>{list.items.filter(
+									(i) => isCheckedOff(i.itemId) || (getManualHave(i.itemId) ?? 0) >= i.quantity
+								).length}/{list.items.length} done</span
+							>
 						{/if}
 					</button>
 					<button
 						type="button"
-						onclick={() => showAddModal = true}
+						onclick={() => (showAddModal = true)}
 						class="rounded bg-purple-600 px-2 py-1 text-xs text-white hover:bg-purple-700"
 					>
 						+ Add
@@ -605,7 +771,9 @@
 				{#if !isSectionCollapsed('items')}
 					<div class="divide-y divide-gray-700">
 						{#if list.items.length === 0}
-							<div class="px-4 py-3 text-sm text-gray-400">No items yet. Click + Add to get started.</div>
+							<div class="px-4 py-3 text-sm text-gray-400">
+								No items yet. Click + Add to get started.
+							</div>
 						{:else}
 							{#each list.items as listItem (listItem.id)}
 								{@const item = getItemById(listItem.itemId)}
@@ -613,23 +781,43 @@
 								{@const haveQty = getManualHave(listItem.itemId) ?? 0}
 								{@const isComplete = isCheckedOff(listItem.itemId) || haveQty >= listItem.quantity}
 								{#if !hideCompleted || !isComplete}
-									<div class="flex items-center gap-3 px-4 py-2 hover:bg-gray-750 {isComplete ? 'opacity-50' : ''}">
+									<div
+										class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete
+											? 'opacity-50'
+											: ''}"
+									>
 										<!-- Checkbox -->
 										<button
 											type="button"
 											onclick={() => toggleCheckedOff(listItem.itemId)}
-											class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(listItem.itemId) ? 'border-green-500 bg-green-600' : 'border-gray-500 hover:border-gray-400'}"
-											aria-label={isCheckedOff(listItem.itemId) ? 'Unmark as complete' : 'Mark as complete'}
+											class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(
+												listItem.itemId
+											)
+												? 'border-green-500 bg-green-600'
+												: 'border-gray-500 hover:border-gray-400'}"
+											aria-label={isCheckedOff(listItem.itemId)
+												? 'Unmark as complete'
+												: 'Mark as complete'}
 										>
 											{#if isCheckedOff(listItem.itemId)}
-												<svg class="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+												<svg
+													class="h-3 w-3 text-white"
+													fill="none"
+													stroke="currentColor"
+													viewBox="0 0 24 24"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														stroke-width="3"
+														d="M5 13l4 4L19 7"
+													/>
 												</svg>
 											{/if}
 										</button>
 										<!-- Icon + Name with Recipe Popover -->
 										<RecipePopover itemId={listItem.itemId}>
-											<div class="flex items-center gap-3 flex-1 min-w-0 cursor-help">
+											<div class="flex min-w-0 flex-1 cursor-help items-center gap-3">
 												<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
 													{#if iconUrl}
 														<img src={iconUrl} alt="" class="h-7 w-7 object-contain" />
@@ -638,36 +826,57 @@
 													{/if}
 												</div>
 												<div class="min-w-0 flex-1">
-													<span class="text-sm text-white">{item?.name || `Item #${listItem.itemId}`}</span>
-													<span class="ml-1 text-sm text-purple-400 tabular-nums">x{formatQty(listItem.quantity)}</span>
+													<span class="text-sm text-white"
+														>{item?.name || `Item #${listItem.itemId}`}</span
+													>
+													<span class="ml-1 text-sm text-purple-400 tabular-nums"
+														>x{formatQty(listItem.quantity)}</span
+													>
 												</div>
 											</div>
 										</RecipePopover>
 										<!-- Have / Need + Controls -->
 										<div class="flex items-center gap-2 text-sm">
-											<div class="flex items-center rounded-md bg-gray-900/50 border border-gray-600 overflow-hidden">
+											<div
+												class="flex items-center overflow-hidden rounded-md border border-gray-600 bg-gray-900/50"
+											>
 												<input
 													type="number"
 													value={haveQty}
-													onchange={(e) => setManualHave(listItem.itemId, parseInt(e.currentTarget.value) || 0)}
+													onchange={(e) =>
+														setManualHave(listItem.itemId, parseInt(e.currentTarget.value) || 0)}
 													min="0"
-													class="w-16 bg-transparent px-2 py-1 text-right text-sm text-white focus:outline-none focus:bg-gray-800 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+													class="w-16 [appearance:textfield] bg-transparent px-2 py-1 text-right text-sm text-white focus:bg-gray-800 focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 													title="Amount you have"
 												/>
 												<span class="px-1 text-gray-500">/</span>
 												<input
 													type="number"
 													value={listItem.quantity}
-													onchange={(e) => handleQuantityChange(listItem.itemId, parseInt(e.currentTarget.value) || 1)}
+													onchange={(e) =>
+														handleQuantityChange(
+															listItem.itemId,
+															parseInt(e.currentTarget.value) || 1
+														)}
 													min="1"
-													class="w-16 bg-transparent px-2 py-1 text-left text-sm text-purple-300 focus:outline-none focus:bg-gray-800 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+													class="w-16 [appearance:textfield] bg-transparent px-2 py-1 text-left text-sm text-purple-300 focus:bg-gray-800 focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 													title="Amount to craft"
 												/>
 											</div>
-											<div class="w-5 h-5 flex-shrink-0">
+											<div class="h-5 w-5 flex-shrink-0">
 												{#if isComplete}
-													<svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+													<svg
+														class="h-5 w-5 text-green-500"
+														fill="none"
+														stroke="currentColor"
+														viewBox="0 0 24 24"
+													>
+														<path
+															stroke-linecap="round"
+															stroke-linejoin="round"
+															stroke-width="2"
+															d="M5 13l4 4L19 7"
+														/>
 													</svg>
 												{/if}
 											</div>
@@ -677,7 +886,12 @@
 												aria-label="Remove item"
 											>
 												<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														stroke-width="2"
+														d="M6 18L18 6M6 6l12 12"
+													/>
 												</svg>
 											</button>
 										</div>
@@ -701,7 +915,9 @@
 				aria-label="Close modal"
 			></button>
 
-			<div class="relative flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg bg-gray-800 shadow-xl">
+			<div
+				class="relative flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg bg-gray-800 shadow-xl"
+			>
 				<!-- Header -->
 				<div class="flex items-center justify-between border-b border-gray-700 p-4">
 					<h3 class="text-lg font-semibold text-white">Add Items to List</h3>
@@ -712,7 +928,12 @@
 						aria-label="Close"
 					>
 						<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="2"
+								d="M6 18L18 6M6 6l12 12"
+							/>
 						</svg>
 					</button>
 				</div>
@@ -724,7 +945,7 @@
 						value={searchQuery}
 						oninput={(e) => handleSearch(e.currentTarget.value)}
 						placeholder="Search items by name..."
-						class="w-full rounded-lg border border-gray-600 bg-gray-700 px-4 py-3 text-lg text-white placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+						class="w-full rounded-lg border border-gray-600 bg-gray-700 px-4 py-3 text-lg text-white placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
 						autofocus
 					/>
 					{#if searchQuery.length > 0 && searchQuery.length < 2}
@@ -738,9 +959,10 @@
 						<div class="space-y-2">
 							{#each searchResults as item (item.id)}
 								{@const searchIconUrl = getItemIconUrl(item.iconAssetName)}
-								{@const isInList = list?.items.some(li => li.itemId === item.id)}
+								{@const isInList = list?.items.some((li) => li.itemId === item.id)}
 								{@const recipes = getSortedRecipes(item.id)}
-								{@const selectedRecipeId = getSelectedRecipe(item.id) ?? getDefaultRecipeId(item.id)}
+								{@const selectedRecipeId =
+									getSelectedRecipe(item.id) ?? getDefaultRecipeId(item.id)}
 								<div class="rounded-lg bg-gray-700 p-3">
 									<div class="flex items-center gap-3">
 										<!-- Icon -->
@@ -768,7 +990,8 @@
 											<input
 												type="number"
 												value={getItemQuantity(item.id)}
-												onchange={(e) => setItemQuantity(item.id, parseInt(e.currentTarget.value) || 1)}
+												onchange={(e) =>
+													setItemQuantity(item.id, parseInt(e.currentTarget.value) || 1)}
 												onwheel={(e) => handleQuantityWheel(item.id, e)}
 												min="1"
 												class="w-20 rounded border border-gray-600 bg-gray-800 px-2 py-1.5 text-center text-white focus:border-blue-500 focus:outline-none"
@@ -776,17 +999,41 @@
 											<button
 												type="button"
 												onclick={() => handleAddItem(item.id)}
-												class="rounded-lg px-3 py-1.5 text-white transition-all duration-300 {isRecentlyAdded(item.id) ? 'bg-green-600' : 'bg-blue-600 hover:bg-blue-700'}"
+												class="rounded-lg px-3 py-1.5 text-white transition-all duration-300 {isRecentlyAdded(
+													item.id
+												)
+													? 'bg-green-600'
+													: 'bg-blue-600 hover:bg-blue-700'}"
 												title={isRecentlyAdded(item.id) ? 'Added!' : 'Add to list'}
 												aria-label={isRecentlyAdded(item.id) ? 'Added to list' : 'Add to list'}
 											>
 												{#if isRecentlyAdded(item.id)}
-													<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+													<svg
+														class="h-5 w-5"
+														fill="none"
+														stroke="currentColor"
+														viewBox="0 0 24 24"
+													>
+														<path
+															stroke-linecap="round"
+															stroke-linejoin="round"
+															stroke-width="2"
+															d="M5 13l4 4L19 7"
+														/>
 													</svg>
 												{:else}
-													<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+													<svg
+														class="h-5 w-5"
+														fill="none"
+														stroke="currentColor"
+														viewBox="0 0 24 24"
+													>
+														<path
+															stroke-linecap="round"
+															stroke-linejoin="round"
+															stroke-width="2"
+															d="M12 4v16m8-8H4"
+														/>
 													</svg>
 												{/if}
 											</button>
@@ -799,22 +1046,32 @@
 											<span class="text-xs text-gray-400">Recipe:</span>
 											<select
 												value={selectedRecipeId}
-												onchange={(e) => setSelectedRecipe(item.id, parseInt(e.currentTarget.value))}
+												onchange={(e) =>
+													setSelectedRecipe(item.id, parseInt(e.currentTarget.value))}
 												class="flex-1 rounded border border-gray-600 bg-gray-800 px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none"
 											>
 												{#each recipes as recipe, i (recipe.id)}
 													<option value={recipe.id}>
-														{recipe.craftingStationName || recipe.name} (×{recipe.outputQuantity}){#if recipe.cost !== undefined} · {formatCost(recipe.cost)}{/if}{#if i === 0 && recipe.cost !== undefined} ★{/if}
+														{recipe.craftingStationName || recipe.name} (×{recipe.outputQuantity}){#if recipe.cost !== undefined}
+															· {formatCost(
+																recipe.cost
+															)}{/if}{#if i === 0 && recipe.cost !== undefined}
+															★{/if}
 													</option>
 												{/each}
 											</select>
 										</div>
 									{:else if recipes.length === 1}
 										<p class="mt-1 text-xs text-gray-500">
-											{recipes[0].craftingStationName || recipes[0].name} (×{recipes[0].outputQuantity}){#if recipes[0].cost !== undefined} · Cost: {formatCost(recipes[0].cost)}{/if}
+											{recipes[0].craftingStationName || recipes[0].name} (×{recipes[0]
+												.outputQuantity}){#if recipes[0].cost !== undefined}
+												· Cost: {formatCost(recipes[0].cost)}{/if}
 										</p>
 									{:else}
-										<p class="mt-1 text-xs text-gray-500">No recipe (raw material){#if item.materialCost !== undefined} · Cost: {formatCost(item.materialCost)}{/if}</p>
+										<p class="mt-1 text-xs text-gray-500">
+											No recipe (raw material){#if item.materialCost !== undefined}
+												· Cost: {formatCost(item.materialCost)}{/if}
+										</p>
 									{/if}
 								</div>
 							{/each}
@@ -846,11 +1103,13 @@
 			<button
 				type="button"
 				class="absolute inset-0 bg-black/70"
-				onclick={() => showSourceModal = false}
+				onclick={() => (showSourceModal = false)}
 				aria-label="Close modal"
 			></button>
 
-			<div class="relative max-h-[80vh] w-full max-w-lg overflow-auto rounded-lg bg-gray-800 p-6 shadow-xl">
+			<div
+				class="relative max-h-[80vh] w-full max-w-lg overflow-auto rounded-lg bg-gray-800 p-6 shadow-xl"
+			>
 				<h3 class="text-lg font-semibold text-white">Select Inventory Sources</h3>
 				<p class="mt-1 text-sm text-gray-400">
 					Choose which inventories to include when calculating materials for this list.
@@ -861,8 +1120,11 @@
 
 				<div class="mt-4 space-y-4">
 					{#each [...sourcesByClaim.value.entries()] as [claimId, sources] (claimId)}
-						{@const claimName = claimId === 'player' ? 'Player Inventory' : (sources[0]?.claimName || claimId)}
-						{@const allSelected = sources.every(s => selectedSourceIds.length === 0 || selectedSourceIds.includes(s.id))}
+						{@const claimName =
+							claimId === 'player' ? 'Player Inventory' : sources[0]?.claimName || claimId}
+						{@const allSelected = sources.every(
+							(s) => selectedSourceIds.length === 0 || selectedSourceIds.includes(s.id)
+						)}
 
 						<div class="rounded-lg border border-gray-600 p-3">
 							<div class="flex items-center justify-between">
@@ -877,10 +1139,13 @@
 							</div>
 							<div class="mt-2 space-y-1">
 								{#each sources as source (source.id)}
-									<label class="flex items-center gap-2 cursor-pointer p-1 hover:bg-gray-700 rounded">
+									<label
+										class="flex cursor-pointer items-center gap-2 rounded p-1 hover:bg-gray-700"
+									>
 										<input
 											type="checkbox"
-											checked={selectedSourceIds.length === 0 || selectedSourceIds.includes(source.id)}
+											checked={selectedSourceIds.length === 0 ||
+												selectedSourceIds.includes(source.id)}
 											onchange={() => toggleSource(source.id)}
 											class="rounded border-gray-500 bg-gray-700 text-blue-600 focus:ring-blue-500"
 										/>
@@ -901,7 +1166,7 @@
 				<div class="mt-6 flex justify-end gap-3">
 					<button
 						type="button"
-						onclick={() => showSourceModal = false}
+						onclick={() => (showSourceModal = false)}
 						class="rounded-lg px-4 py-2 text-gray-400 hover:bg-gray-700 hover:text-white"
 					>
 						Cancel

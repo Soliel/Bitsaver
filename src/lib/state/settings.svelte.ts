@@ -6,7 +6,7 @@
 import { browser } from '$app/environment';
 import type { UserConfig, AccessibleClaim } from '$lib/types/app';
 
-const STORAGE_KEY = 'bithelper-config';
+const STORAGE_KEY = 'bitsaver-config';
 
 // Default configuration
 const defaultConfig: UserConfig = {

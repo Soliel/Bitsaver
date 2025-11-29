@@ -343,6 +343,18 @@ export async function updateListSources(listId: string, sourceIds: string[]): Pr
 	await saveList(toPlainList(list));
 }
 
+/**
+ * Update auto-refresh setting for a list
+ */
+export async function updateListAutoRefresh(listId: string, enabled: boolean): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	list.autoRefreshEnabled = enabled;
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
+
 
 /**
  * Calculate material tree for an item (full tree, no inventory reduction)

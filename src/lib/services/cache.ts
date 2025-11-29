@@ -8,7 +8,7 @@ import type { InventorySource, SourcedItem } from '$lib/types/inventory';
 import type { CraftingList, CacheMetadata } from '$lib/types/app';
 
 // Database schema version
-const DB_NAME = 'bithelper';
+const DB_NAME = 'bitsaver';
 const DB_VERSION = 2; // Incremented for recipes store
 
 // Cache TTL constants (in milliseconds)

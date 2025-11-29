@@ -7,7 +7,7 @@ import { dev } from '$app/environment';
 
 // Use proxy in development to avoid CORS issues
 const API_BASE = dev ? '/api/bitjita' : 'https://bitjita.com/api';
-const APP_IDENTIFIER = 'bithelper';
+const APP_IDENTIFIER = 'bitsaver';
 
 // Rate limiting configuration
 const RATE_LIMIT_DELAY_MS = 250; // 240 req/min to stay under 250 limit
