@@ -32,6 +32,14 @@ export interface ParentContribution {
 	coverage: number; // How many units of THIS item are covered
 }
 
+// DEV: Tracks how much of a material's requirement comes from each list item
+export interface RootItemContribution {
+	rootItemId: number;      // The list item (final product) ID
+	rootItemName: string;    // Name for display
+	quantity: number;        // How many list items requested
+	contribution: number;    // How much this contributes to the material's baseRequired
+}
+
 // Material requirement with inventory info
 export interface MaterialRequirement extends FlatMaterial {
 	baseRequired: number;  // Full tree amount (stable, assumes 0 inventory)
@@ -39,6 +47,7 @@ export interface MaterialRequirement extends FlatMaterial {
 	have: number;          // Current inventory + manual override
 	isComplete: boolean;   // remaining === 0
 	parentContributions?: ParentContribution[]; // Coverage from parent items in inventory
+	rootContributions?: RootItemContribution[]; // DEV: breakdown by list item
 }
 
 // Grouped materials by tier for display

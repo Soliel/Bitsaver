@@ -30,6 +30,7 @@
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import RecipePopover from '$lib/components/RecipePopover.svelte';
 	import HaveBreakdownTooltip from '$lib/components/HaveBreakdownTooltip.svelte';
+	import DevRequirementBreakdown from '$lib/components/DevRequirementBreakdown.svelte';
 	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode } from '$lib/types/app';
 
 	// Get list from URL param
@@ -1412,18 +1413,27 @@
 					{/if}
 				</div>
 			</RecipePopover>
-			<HaveBreakdownTooltip
-				itemId={mat.itemId}
-				listSourceIds={list?.enabledSourceIds ?? []}
-				manualAmount={getManualHave(mat.itemId)}
-				isCheckedOff={isCheckedOff(mat.itemId)}
-				parentContributions={mat.parentContributions}
-			>
-				<span
-					class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
-					>x{formatQty(mat.baseRequired)}</span
+			{#if import.meta.env.DEV && mat.rootContributions?.length}
+				<DevRequirementBreakdown contributions={mat.rootContributions}>
+					<span
+						class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums border-b border-dashed border-yellow-600/50"
+						>x{formatQty(mat.baseRequired)}</span
+					>
+				</DevRequirementBreakdown>
+			{:else}
+				<HaveBreakdownTooltip
+					itemId={mat.itemId}
+					listSourceIds={list?.enabledSourceIds ?? []}
+					manualAmount={getManualHave(mat.itemId)}
+					isCheckedOff={isCheckedOff(mat.itemId)}
+					parentContributions={mat.parentContributions}
 				>
-			</HaveBreakdownTooltip>
+					<span
+						class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
+						>x{formatQty(mat.baseRequired)}</span
+					>
+				</HaveBreakdownTooltip>
+			{/if}
 			<!-- Have / Need / Remaining -->
 			<div class="flex flex-shrink-0 items-center gap-2 text-sm">
 				{#if mat.remaining < mat.baseRequired && !isComplete}

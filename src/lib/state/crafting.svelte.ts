@@ -3,7 +3,7 @@
  * Persisted to IndexedDB
  */
 
-import type { CraftingList, CraftingListItem, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution } from '$lib/types/app';
+import type { CraftingList, CraftingListItem, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution, RootItemContribution } from '$lib/types/app';
 import type { MaterialNode, FlatMaterial, Item, Recipe } from '$lib/types/game';
 import { getCachedLists, getCachedList, saveList, deleteList as deleteCachedList, deleteListProgress } from '$lib/services/cache';
 import { gameData, getItemById, getItemWithRecipes } from './game-data.svelte';
@@ -718,6 +718,99 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 }
 
 /**
+ * Recalculate material quantities to optimize for batch recipes.
+ *
+ * The tree builds quantities with each branch calculating ceil(need/output) independently.
+ * When multiple branches need the same item, this over-counts because:
+ *   Branch A: need 2, ceil(2/10) = 1 craft
+ *   Branch B: need 2, ceil(2/10) = 1 craft
+ *   Total: 2 crafts (but we only need ceil(4/10) = 1 craft)
+ *
+ * This function recalculates from the top down using aggregated demands.
+ */
+function optimizeBatchQuantities(
+	flatMaterials: Map<number, FlatMaterial>,
+	listItems: CraftingListItem[]
+): void {
+	// Collect all item IDs we need to process (materials + list items as roots)
+	const allItemIds = new Set<number>(flatMaterials.keys());
+	for (const li of listItems) {
+		allItemIds.add(li.itemId);
+	}
+
+	// Get recipe for each item (using same logic as tree building)
+	const itemRecipes = new Map<number, Recipe | null>();
+	for (const itemId of allItemIds) {
+		const item = getItemById(itemId);
+		if (!item) {
+			itemRecipes.set(itemId, null);
+			continue;
+		}
+
+		const itemDetails = getItemWithRecipes(itemId);
+		const allRecipes = itemDetails?.craftingRecipes || [];
+
+		// Filter to valid recipes (same logic as calculateMaterialTree)
+		const validRecipes = allRecipes.filter(recipe => {
+			if (recipe.ingredients.length === 0) return false;
+			if (!recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+			if (item.tier === -1) return true;
+			return !recipe.ingredients.some(ing => {
+				const ingItem = getItemById(ing.itemId);
+				if (!ingItem || ingItem.tier === -1) return false;
+				return ingItem.tier > item.tier;
+			});
+		});
+
+		const sorted = [...validRecipes].sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity));
+		itemRecipes.set(itemId, sorted[0] || null);
+	}
+
+	// Calculate correct demands top-down
+	const correctDemands = new Map<number, number>();
+
+	// Initialize with list item demands (the roots)
+	for (const li of listItems) {
+		correctDemands.set(li.itemId, (correctDemands.get(li.itemId) || 0) + li.quantity);
+	}
+
+	// Process items by step (highest step first = finished products first, raw materials last)
+	const itemSteps = new Map<number, number>();
+	for (const itemId of allItemIds) {
+		itemSteps.set(itemId, getItemNaturalStep(itemId));
+	}
+
+	const sortedItemIds = [...allItemIds].sort((a, b) =>
+		(itemSteps.get(b) || 0) - (itemSteps.get(a) || 0)
+	);
+
+	for (const itemId of sortedItemIds) {
+		const demand = correctDemands.get(itemId) || 0;
+		if (demand <= 0) continue;
+
+		const recipe = itemRecipes.get(itemId);
+		if (!recipe) continue; // Raw material, no children to calculate
+
+		// Calculate optimal craft count from aggregated demand
+		const craftCount = Math.ceil(demand / recipe.outputQuantity);
+
+		// Add ingredient demands
+		for (const ing of recipe.ingredients) {
+			const ingDemand = craftCount * ing.quantity;
+			correctDemands.set(ing.itemId, (correctDemands.get(ing.itemId) || 0) + ingDemand);
+		}
+	}
+
+	// Update flatMaterials with correct quantities
+	for (const [itemId, mat] of flatMaterials) {
+		const correct = correctDemands.get(itemId);
+		if (correct !== undefined) {
+			mat.quantity = correct;
+		}
+	}
+}
+
+/**
  * Calculate all material requirements for a crafting list
  * Uses cached full trees and propagates inventory through them
  * @param listId - The list to calculate for
@@ -756,11 +849,31 @@ export async function calculateListRequirements(
 	// Compute remaining needs by propagating inventory through the tree
 	const { needs, parentContributions: rawContributions } = computeRemainingNeeds(trees, have, checkedOff);
 
+	// Track root contributions for each material (DEV only)
+	const rootContributions = new Map<number, RootItemContribution[]>();
+
 	// Flatten trees to get base info (step, item details)
 	const flatMaterials = new Map<number, FlatMaterial>();
-	for (const tree of trees) {
+	for (let i = 0; i < trees.length; i++) {
+		const tree = trees[i];
+		const listItem = list.items[i];
+		const rootItem = getItemById(listItem.itemId);
+
 		const flattened = flattenMaterialTree(tree);
 		for (const mat of flattened) {
+			// Track root contribution (for DEV debugging)
+			if (import.meta.env.DEV) {
+				const contributions = rootContributions.get(mat.itemId) || [];
+				contributions.push({
+					rootItemId: listItem.itemId,
+					rootItemName: rootItem?.name || `Item #${listItem.itemId}`,
+					quantity: listItem.quantity,
+					contribution: mat.quantity
+				});
+				rootContributions.set(mat.itemId, contributions);
+			}
+
+			// Aggregate flat materials (existing logic)
 			const existing = flatMaterials.get(mat.itemId);
 			if (existing) {
 				existing.quantity += mat.quantity;
@@ -769,6 +882,9 @@ export async function calculateListRequirements(
 			}
 		}
 	}
+
+	// Optimize quantities for batch recipes (fixes over-counting when multiple branches need same item)
+	optimizeBatchQuantities(flatMaterials, list.items);
 
 	// Aggregate parent contributions by parent item ID
 	function aggregateContributions(itemId: number): ParentContribution[] | undefined {
@@ -804,7 +920,9 @@ export async function calculateListRequirements(
 	for (const [itemId, flatMat] of flatMaterials) {
 		const need = needs.get(itemId);
 		const baseRequired = flatMat.quantity;
-		const remaining = need?.remaining ?? 0;
+		// Cap remaining at baseRequired since we optimized quantities after tree traversal
+		// The tree may have over-counted, so remaining from tree could exceed optimized baseRequired
+		const remaining = Math.min(need?.remaining ?? 0, baseRequired);
 
 		// "have" is the effective amount covered, including propagation
 		// e.g., if you have Rough Planks, that "covers" some Wood requirement
@@ -817,7 +935,8 @@ export async function calculateListRequirements(
 			remaining, // After propagation (what you still need)
 			have: effectiveHave, // Effective amount covered (including propagation)
 			isComplete: remaining === 0,
-			parentContributions: aggregateContributions(itemId)
+			parentContributions: aggregateContributions(itemId),
+			rootContributions: import.meta.env.DEV ? rootContributions.get(itemId) : undefined
 		});
 	}
 
