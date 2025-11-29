@@ -52,6 +52,11 @@ function isPackageOrUnpackRecipe(recipeName) {
 	return recipeName.includes('Package') || recipeName.includes('Unpack');
 }
 
+// Knowledge IDs that block recipes (developer/debug only)
+const BLOCKED_KNOWLEDGE_IDS = new Set([
+	12345 // "The Art of Cheating" - developer-only
+]);
+
 // Load and parse JSON file
 async function loadJson(filename) {
 	const filePath = join(GAME_DATA_DIR, filename);
@@ -140,6 +145,11 @@ async function generateMaterialCosts() {
 	// Build recipes by output item ID (only Item type outputs with Item type ingredients)
 	const recipesByOutput = new Map();
 	for (const recipe of craftingRecipes) {
+		// Skip recipes that require blocked knowledges (e.g., "The Art of Cheating")
+		if (recipe.required_knowledges?.some(k => BLOCKED_KNOWLEDGE_IDS.has(k))) {
+			continue;
+		}
+
 		for (const output of recipe.crafted_item_stacks || []) {
 			if (output.item_type === 'Item') {
 				if (!recipesByOutput.has(output.item_id)) {

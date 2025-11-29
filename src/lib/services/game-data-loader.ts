@@ -4,7 +4,7 @@
  */
 
 // Bump this version when data loading logic changes to force cache refresh
-export const DATA_LOADER_VERSION = 9;
+export const DATA_LOADER_VERSION = 10;
 
 import type {
 	Item,
@@ -63,6 +63,7 @@ interface RawRecipe {
 		quantity: number;
 		item_type: string;
 	}>;
+	required_knowledges?: number[];
 }
 
 interface RawSkill {
@@ -159,6 +160,11 @@ const RARITY_MAP: Record<string, number> = {
 // Building types to exclude (not true crafting recipes)
 const EXCLUDED_BUILDING_TYPES = new Set([
 	127749503 // Scrap Bench - used for recrafting/recycling, not crafting
+]);
+
+// Knowledge IDs that block recipes (developer/debug only)
+const BLOCKED_KNOWLEDGE_IDS = new Set([
+	12345 // "The Art of Cheating" - developer-only
 ]);
 
 /**
@@ -336,6 +342,11 @@ function parseRecipes(
 
 		// Skip recipes from excluded buildings (e.g., Scrap Bench)
 		if (raw.building_requirement && EXCLUDED_BUILDING_TYPES.has(raw.building_requirement.building_type)) {
+			continue;
+		}
+
+		// Skip recipes that require blocked knowledges (e.g., "The Art of Cheating")
+		if (raw.required_knowledges?.some(k => BLOCKED_KNOWLEDGE_IDS.has(k))) {
 			continue;
 		}
 
@@ -600,6 +611,11 @@ function buildItemToCargoSkillMap(
 
 		// Skip recipes from excluded buildings
 		if (raw.building_requirement && EXCLUDED_BUILDING_TYPES.has(raw.building_requirement.building_type)) {
+			continue;
+		}
+
+		// Skip recipes that require blocked knowledges (e.g., "The Art of Cheating")
+		if (raw.required_knowledges?.some(k => BLOCKED_KNOWLEDGE_IDS.has(k))) {
 			continue;
 		}
 
