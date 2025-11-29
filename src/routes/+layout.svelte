@@ -26,7 +26,19 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>BitSaver - Bitcraft Crafting Helper</title>
+	<title>Bitsaver - Bitcraft Crafting Calculator & Material Planner</title>
+	<meta name="description" content="Plan your Bitcraft crafting efficiently. Calculate materials, track inventory across claims, and optimize your crafting lists with Bitsaver - the essential Bitcraft companion tool." />
+	<meta name="keywords" content="Bitcraft, crafting calculator, material planner, inventory tracker, Bitcraft tools, Bitcraft helper, crafting list" />
+
+	<!-- Open Graph / Facebook -->
+	<meta property="og:type" content="website" />
+	<meta property="og:title" content="Bitsaver - Bitcraft Crafting Calculator" />
+	<meta property="og:description" content="Plan your Bitcraft crafting efficiently. Calculate materials, track inventory, and optimize your crafting lists." />
+
+	<!-- Twitter -->
+	<meta name="twitter:card" content="summary" />
+	<meta name="twitter:title" content="Bitsaver - Bitcraft Crafting Calculator" />
+	<meta name="twitter:description" content="Plan your Bitcraft crafting efficiently. Calculate materials, track inventory, and optimize your crafting lists." />
 </svelte:head>
 
 {#if needsOnboarding}

@@ -44,14 +44,27 @@ export const itemsArray = {
 	}
 };
 
-// Getter: deduplicated items (by name, keeping lowest rarity)
+// Getter: deduplicated items (by name, preferring items with recipes, then lowest rarity)
 export const deduplicatedItems = {
 	get value() {
 		const byName = new Map<string, Item>();
 		for (const item of gameData.items.values()) {
 			const existing = byName.get(item.name);
-			if (!existing || item.rarity < existing.rarity) {
+
+			if (!existing) {
 				byName.set(item.name, item);
+			} else {
+				// Prefer items that have recipes
+				const existingHasRecipe = gameData.recipes.has(existing.id);
+				const itemHasRecipe = gameData.recipes.has(item.id);
+
+				if (itemHasRecipe && !existingHasRecipe) {
+					byName.set(item.name, item);
+				} else if (!itemHasRecipe && existingHasRecipe) {
+					// Keep existing
+				} else if (item.rarity < existing.rarity) {
+					byName.set(item.name, item);
+				}
 			}
 		}
 		return Array.from(byName.values());
@@ -222,7 +235,7 @@ export async function getItemWithRecipesAsync(itemId: number): Promise<ItemWithR
 }
 
 /**
- * Search items by name (deduplicated by name, keeping lowest rarity)
+ * Search items by name (deduplicated by name, preferring items with recipes, then lowest rarity)
  */
 export function searchItems(query: string, limit = 20): Item[] {
 	if (!query.trim()) return [];
@@ -233,9 +246,25 @@ export function searchItems(query: string, limit = 20): Item[] {
 	for (const item of gameData.items.values()) {
 		if (item.name.toLowerCase().includes(lowerQuery)) {
 			const existing = resultsByName.get(item.name);
-			// Keep the lowest rarity version (they have the same recipes)
-			if (!existing || item.rarity < existing.rarity) {
+
+			if (!existing) {
 				resultsByName.set(item.name, item);
+			} else {
+				// Prefer items that have recipes
+				const existingHasRecipe = gameData.recipes.has(existing.id);
+				const itemHasRecipe = gameData.recipes.has(item.id);
+
+				if (itemHasRecipe && !existingHasRecipe) {
+					// New item has recipe, existing doesn't - prefer new item
+					resultsByName.set(item.name, item);
+				} else if (!itemHasRecipe && existingHasRecipe) {
+					// Existing has recipe, new doesn't - keep existing
+				} else {
+					// Both have recipes or neither has - use rarity tiebreaker
+					if (item.rarity < existing.rarity) {
+						resultsByName.set(item.name, item);
+					}
+				}
 			}
 		}
 	}
