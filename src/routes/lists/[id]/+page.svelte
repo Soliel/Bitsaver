@@ -26,17 +26,21 @@
 		gameData,
 		getItemById,
 		getCargoById,
+		getConstructionRecipeById,
+		getBuildingDescriptionById,
 		searchItems,
-		findRecipesForItem
+		findRecipesForItem,
+		searchConstructionRecipes
 	} from '$lib/state/game-data.svelte';
-	import { addItemToList } from '$lib/state/crafting.svelte';
+	import type { ConstructionRecipe } from '$lib/types/game';
+	import { addItemToList, addBuildingToList } from '$lib/state/crafting.svelte';
 	import { getListProgress, saveListProgress } from '$lib/services/cache';
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import RecipePopover from '$lib/components/RecipePopover.svelte';
 	import HaveBreakdownTooltip from '$lib/components/HaveBreakdownTooltip.svelte';
 	import DevRequirementBreakdown from '$lib/components/DevRequirementBreakdown.svelte';
 	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode, CraftingListEntry } from '$lib/types/app';
-	import { isItemEntry, isCargoEntry } from '$lib/types/app';
+	import { isItemEntry, isCargoEntry, isBuildingEntry } from '$lib/types/app';
 
 	// Helper: Get unique material key for tracking
 	function getMaterialKey(mat: MaterialRequirement): string {
@@ -300,7 +304,11 @@
 	const completedEntriesCount = $derived.by(() => {
 		if (!list?.entries) return 0;
 		return list.entries.filter((entry) => {
-			const key = isItemEntry(entry) ? `item-${entry.itemId}` : `cargo-${entry.cargoId}`;
+			const key = isItemEntry(entry)
+				? `item-${entry.itemId}`
+				: isCargoEntry(entry)
+					? `cargo-${entry.cargoId}`
+					: `building-${entry.constructionRecipeId}`;
 			const have = manualHave.get(key) ?? 0;
 			return checkedOff.has(key) || have >= entry.quantity;
 		}).length;
@@ -332,14 +340,19 @@
 		scheduleProgressSave();
 	}
 
-	// Item search for adding
+	// Item/Building search for adding
+	type SearchTab = 'items' | 'buildings';
+	let searchTab = $state<SearchTab>('items');
 	let searchQuery = $state('');
 	let searchResults = $state<ReturnType<typeof searchItems>>([]);
+	let buildingSearchResults = $state<ConstructionRecipe[]>([]);
 	let showAddModal = $state(false);
 	let searchInputEl = $state<HTMLInputElement | null>(null);
 	let itemQuantities = $state<Map<number, number>>(new Map());
 	let itemRecipes = $state<Map<number, number | undefined>>(new Map()); // itemId -> selected recipeId
 	let recentlyAdded = $state<Map<number, boolean>>(new Map()); // itemId -> show checkmark
+	let buildingQuantities = $state<Map<number, number>>(new Map()); // constructionRecipeId -> quantity
+	let recentlyAddedBuildings = $state<Map<number, boolean>>(new Map()); // constructionRecipeId -> show checkmark
 
 	// Focus search input when add modal opens
 	$effect(() => {
@@ -518,8 +531,10 @@
 		searchQuery = query;
 		if (query.length >= 2) {
 			searchResults = searchItems(query, 50);
+			buildingSearchResults = searchConstructionRecipes(query, 50);
 		} else {
 			searchResults = [];
+			buildingSearchResults = [];
 		}
 	}
 
@@ -606,13 +621,57 @@
 		}, 1500);
 	}
 
+	// Building quantity helpers
+	function getBuildingQuantity(recipeId: number): number {
+		return buildingQuantities.get(recipeId) ?? 1;
+	}
+
+	function setBuildingQuantity(recipeId: number, quantity: number) {
+		const newMap = new Map(buildingQuantities);
+		newMap.set(recipeId, Math.max(1, quantity));
+		buildingQuantities = newMap;
+	}
+
+	function handleBuildingQuantityWheel(recipeId: number, event: WheelEvent) {
+		event.preventDefault();
+		const currentQty = getBuildingQuantity(recipeId);
+		const delta = event.deltaY < 0 ? 1 : -1;
+		setBuildingQuantity(recipeId, currentQty + delta);
+	}
+
+	function isBuildingRecentlyAdded(recipeId: number): boolean {
+		return recentlyAddedBuildings.get(recipeId) ?? false;
+	}
+
+	async function handleAddBuilding(recipeId: number) {
+		if (!list) return;
+		const quantity = getBuildingQuantity(recipeId);
+		await addBuildingToList(list.id, recipeId, quantity);
+
+		// Show checkmark animation
+		const newAdded = new Map(recentlyAddedBuildings);
+		newAdded.set(recipeId, true);
+		recentlyAddedBuildings = newAdded;
+
+		// Reset checkmark after delay
+		setTimeout(() => {
+			const resetAdded = new Map(recentlyAddedBuildings);
+			resetAdded.delete(recipeId);
+			recentlyAddedBuildings = resetAdded;
+		}, 1500);
+	}
+
 	function closeAddModal() {
 		showAddModal = false;
+		searchTab = 'items';
 		searchQuery = '';
 		searchResults = [];
+		buildingSearchResults = [];
 		itemQuantities = new Map();
 		itemRecipes = new Map();
 		recentlyAdded = new Map();
+		buildingQuantities = new Map();
+		recentlyAddedBuildings = new Map();
 	}
 
 	async function handleRemoveItem(itemId: number) {
@@ -1208,11 +1267,17 @@
 							</div>
 						{:else}
 							{#each list.entries as entry, i (entry.id)}
-								{@const entryKey = isItemEntry(entry) ? `item-${entry.itemId}` : `cargo-${entry.cargoId}`}
+								{@const entryKey = isItemEntry(entry)
+									? `item-${entry.itemId}`
+									: isCargoEntry(entry)
+										? `cargo-${entry.cargoId}`
+										: `building-${entry.constructionRecipeId}`}
 								{@const entryItem = isItemEntry(entry) ? getItemById(entry.itemId) : null}
 								{@const entryCargo = isCargoEntry(entry) ? getCargoById(entry.cargoId) : null}
-								{@const entryName = entryItem?.name ?? entryCargo?.name ?? `Entry #${entry.id}`}
-								{@const iconAsset = entryItem?.iconAssetName ?? entryCargo?.iconAssetName}
+								{@const entryBuilding = isBuildingEntry(entry) ? getConstructionRecipeById(entry.constructionRecipeId) : null}
+								{@const entryBuildingDesc = entryBuilding ? getBuildingDescriptionById(entryBuilding.buildingDescriptionId) : null}
+								{@const entryName = entryItem?.name ?? entryCargo?.name ?? entryBuilding?.name ?? `Entry #${entry.id}`}
+								{@const iconAsset = entryItem?.iconAssetName ?? entryCargo?.iconAssetName ?? entryBuildingDesc?.iconAssetName}
 								{@const iconUrl = iconAsset ? getItemIconUrl(iconAsset) : null}
 								{@const haveQty = manualHave.get(entryKey) ?? 0}
 								{@const isComplete = checkedOff.has(entryKey) || haveQty >= entry.quantity}
@@ -1419,7 +1484,7 @@
 			>
 				<!-- Header -->
 				<div class="flex items-center justify-between border-b border-gray-700 p-4">
-					<h3 class="text-lg font-semibold text-white">Add Items to List</h3>
+					<h3 class="text-lg font-semibold text-white">Add to List</h3>
 					<button
 						type="button"
 						onclick={closeAddModal}
@@ -1437,6 +1502,34 @@
 					</button>
 				</div>
 
+				<!-- Tabs -->
+				<div class="flex border-b border-gray-700">
+					<button
+						type="button"
+						onclick={() => (searchTab = 'items')}
+						class="flex-1 px-4 py-2 text-sm font-medium transition-colors {searchTab === 'items'
+							? 'border-b-2 border-blue-500 text-blue-400'
+							: 'text-gray-400 hover:text-white'}"
+					>
+						Items
+						{#if searchResults.length > 0}
+							<span class="ml-1 text-xs">({searchResults.length})</span>
+						{/if}
+					</button>
+					<button
+						type="button"
+						onclick={() => (searchTab = 'buildings')}
+						class="flex-1 px-4 py-2 text-sm font-medium transition-colors {searchTab === 'buildings'
+							? 'border-b-2 border-blue-500 text-blue-400'
+							: 'text-gray-400 hover:text-white'}"
+					>
+						Buildings
+						{#if buildingSearchResults.length > 0}
+							<span class="ml-1 text-xs">({buildingSearchResults.length})</span>
+						{/if}
+					</button>
+				</div>
+
 				<!-- Search -->
 				<div class="border-b border-gray-700 p-4">
 					<input
@@ -1444,7 +1537,7 @@
 						type="text"
 						value={searchQuery}
 						oninput={(e) => handleSearch(e.currentTarget.value)}
-						placeholder="Search items by name..."
+						placeholder={searchTab === 'items' ? 'Search items by name...' : 'Search buildings by name...'}
 						class="w-full rounded-lg border border-gray-600 bg-gray-700 px-4 py-3 text-lg text-white placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
 					/>
 					{#if searchQuery.length > 0 && searchQuery.length < 2}
@@ -1454,131 +1547,242 @@
 
 				<!-- Results -->
 				<div class="flex-1 overflow-auto p-4">
-					{#if searchResults.length > 0}
-						<div class="space-y-2">
-							{#each searchResults as item (item.id)}
-								{@const searchIconUrl = getItemIconUrl(item.iconAssetName)}
-								{@const isInList = list?.entries.some((e) => isItemEntry(e) && e.itemId === item.id)}
-								{@const recipes = getSortedRecipes(item.id)}
-								{@const selectedRecipeId =
-									getSelectedRecipe(item.id) ?? getDefaultRecipeId(item.id)}
-								<div class="rounded-lg bg-gray-700 p-3">
-									<div class="flex items-center gap-3">
-										<!-- Icon -->
-										<div class="flex h-10 w-10 items-center justify-center rounded bg-gray-600">
-											{#if searchIconUrl}
-												<img src={searchIconUrl} alt="" class="h-8 w-8 object-contain" />
-											{:else}
-												<span class="text-lg text-gray-400">?</span>
-											{/if}
-										</div>
-
-										<!-- Item info -->
-										<div class="min-w-0 flex-1">
-											<p class="truncate font-medium text-white">{item.name}</p>
-											<p class="text-xs text-gray-400">
-												{item.tag || 'Unknown'} · T{item.tier}
-												{#if isInList}
-													<span class="ml-2 text-green-400">In list</span>
-												{/if}
-											</p>
-										</div>
-
-										<!-- Quantity and Add -->
-										<div class="flex items-center gap-2">
-											<input
-												type="number"
-												value={getItemQuantity(item.id)}
-												onchange={(e) =>
-													setItemQuantity(item.id, parseInt(e.currentTarget.value) || 1)}
-												onwheel={(e) => handleQuantityWheel(item.id, e)}
-												min="1"
-												class="w-20 rounded border border-gray-600 bg-gray-800 px-2 py-1.5 text-center text-white focus:border-blue-500 focus:outline-none"
-											/>
-											<button
-												type="button"
-												onclick={() => handleAddItem(item.id)}
-												class="rounded-lg px-3 py-1.5 text-white transition-all duration-300 {isRecentlyAdded(
-													item.id
-												)
-													? 'bg-green-600'
-													: 'bg-blue-600 hover:bg-blue-700'}"
-												title={isRecentlyAdded(item.id) ? 'Added!' : 'Add to list'}
-												aria-label={isRecentlyAdded(item.id) ? 'Added to list' : 'Add to list'}
-											>
-												{#if isRecentlyAdded(item.id)}
-													<svg
-														class="h-5 w-5"
-														fill="none"
-														stroke="currentColor"
-														viewBox="0 0 24 24"
-													>
-														<path
-															stroke-linecap="round"
-															stroke-linejoin="round"
-															stroke-width="2"
-															d="M5 13l4 4L19 7"
-														/>
-													</svg>
+					{#if searchTab === 'items'}
+						<!-- Items Tab -->
+						{#if searchResults.length > 0}
+							<div class="space-y-2">
+								{#each searchResults as item (item.id)}
+									{@const searchIconUrl = getItemIconUrl(item.iconAssetName)}
+									{@const isInList = list?.entries.some((e) => isItemEntry(e) && e.itemId === item.id)}
+									{@const recipes = getSortedRecipes(item.id)}
+									{@const selectedRecipeId =
+										getSelectedRecipe(item.id) ?? getDefaultRecipeId(item.id)}
+									<div class="rounded-lg bg-gray-700 p-3">
+										<div class="flex items-center gap-3">
+											<!-- Icon -->
+											<div class="flex h-10 w-10 items-center justify-center rounded bg-gray-600">
+												{#if searchIconUrl}
+													<img src={searchIconUrl} alt="" class="h-8 w-8 object-contain" />
 												{:else}
-													<svg
-														class="h-5 w-5"
-														fill="none"
-														stroke="currentColor"
-														viewBox="0 0 24 24"
-													>
-														<path
-															stroke-linecap="round"
-															stroke-linejoin="round"
-															stroke-width="2"
-															d="M12 4v16m8-8H4"
-														/>
-													</svg>
+													<span class="text-lg text-gray-400">?</span>
 												{/if}
-											</button>
-										</div>
-									</div>
+											</div>
 
-									<!-- Recipe selector (only if multiple recipes) -->
-									{#if recipes.length > 1}
-										<div class="mt-2 flex items-center gap-2">
-											<span class="text-xs text-gray-400">Recipe:</span>
-											<select
-												value={selectedRecipeId}
-												onchange={(e) =>
-													setSelectedRecipe(item.id, parseInt(e.currentTarget.value))}
-												class="flex-1 rounded border border-gray-600 bg-gray-800 px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none"
-											>
-												{#each recipes as recipe, i (recipe.id)}
-													<option value={recipe.id}>
-														{recipe.craftingStationName || recipe.name} (×{recipe.outputQuantity}){#if recipe.cost !== undefined}
-															· {formatCost(
-																recipe.cost
-															)}{/if}{#if i === 0 && recipe.cost !== undefined}
-															★{/if}
-													</option>
-												{/each}
-											</select>
+											<!-- Item info -->
+											<div class="min-w-0 flex-1">
+												<p class="truncate font-medium text-white">{item.name}</p>
+												<p class="text-xs text-gray-400">
+													{item.tag || 'Unknown'} · T{item.tier}
+													{#if isInList}
+														<span class="ml-2 text-green-400">In list</span>
+													{/if}
+												</p>
+											</div>
+
+											<!-- Quantity and Add -->
+											<div class="flex items-center gap-2">
+												<input
+													type="number"
+													value={getItemQuantity(item.id)}
+													onchange={(e) =>
+														setItemQuantity(item.id, parseInt(e.currentTarget.value) || 1)}
+													onwheel={(e) => handleQuantityWheel(item.id, e)}
+													min="1"
+													class="w-20 rounded border border-gray-600 bg-gray-800 px-2 py-1.5 text-center text-white focus:border-blue-500 focus:outline-none"
+												/>
+												<button
+													type="button"
+													onclick={() => handleAddItem(item.id)}
+													class="rounded-lg px-3 py-1.5 text-white transition-all duration-300 {isRecentlyAdded(
+														item.id
+													)
+														? 'bg-green-600'
+														: 'bg-blue-600 hover:bg-blue-700'}"
+													title={isRecentlyAdded(item.id) ? 'Added!' : 'Add to list'}
+													aria-label={isRecentlyAdded(item.id) ? 'Added to list' : 'Add to list'}
+												>
+													{#if isRecentlyAdded(item.id)}
+														<svg
+															class="h-5 w-5"
+															fill="none"
+															stroke="currentColor"
+															viewBox="0 0 24 24"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																stroke-width="2"
+																d="M5 13l4 4L19 7"
+															/>
+														</svg>
+													{:else}
+														<svg
+															class="h-5 w-5"
+															fill="none"
+															stroke="currentColor"
+															viewBox="0 0 24 24"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																stroke-width="2"
+																d="M12 4v16m8-8H4"
+															/>
+														</svg>
+													{/if}
+												</button>
+											</div>
 										</div>
-									{:else if recipes.length === 1}
-										<p class="mt-1 text-xs text-gray-500">
-											{recipes[0].craftingStationName || recipes[0].name} (×{recipes[0]
-												.outputQuantity}){#if recipes[0].cost !== undefined}
-												· Cost: {formatCost(recipes[0].cost)}{/if}
-										</p>
-									{:else}
-										<p class="mt-1 text-xs text-gray-500">
-											No recipe (raw material){#if item.materialCost !== undefined}
-												· Cost: {formatCost(item.materialCost)}{/if}
-										</p>
-									{/if}
-								</div>
-							{/each}
-						</div>
-					{:else if searchQuery.length >= 2}
-						<p class="py-8 text-center text-gray-400">No items found matching "{searchQuery}"</p>
+
+										<!-- Recipe selector (only if multiple recipes) -->
+										{#if recipes.length > 1}
+											<div class="mt-2 flex items-center gap-2">
+												<span class="text-xs text-gray-400">Recipe:</span>
+												<select
+													value={selectedRecipeId}
+													onchange={(e) =>
+														setSelectedRecipe(item.id, parseInt(e.currentTarget.value))}
+													class="flex-1 rounded border border-gray-600 bg-gray-800 px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none"
+												>
+													{#each recipes as recipe, i (recipe.id)}
+														<option value={recipe.id}>
+															{recipe.craftingStationName || recipe.name} (×{recipe.outputQuantity}){#if recipe.cost !== undefined}
+																· {formatCost(
+																	recipe.cost
+																)}{/if}{#if i === 0 && recipe.cost !== undefined}
+																★{/if}
+														</option>
+													{/each}
+												</select>
+											</div>
+										{:else if recipes.length === 1}
+											<p class="mt-1 text-xs text-gray-500">
+												{recipes[0].craftingStationName || recipes[0].name} (×{recipes[0]
+													.outputQuantity}){#if recipes[0].cost !== undefined}
+													· Cost: {formatCost(recipes[0].cost)}{/if}
+											</p>
+										{:else}
+											<p class="mt-1 text-xs text-gray-500">
+												No recipe (raw material){#if item.materialCost !== undefined}
+													· Cost: {formatCost(item.materialCost)}{/if}
+											</p>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{:else if searchQuery.length >= 2}
+							<p class="py-8 text-center text-gray-400">No items found matching "{searchQuery}"</p>
+						{:else}
+							<p class="py-8 text-center text-gray-400">Start typing to search for items</p>
+						{/if}
 					{:else}
-						<p class="py-8 text-center text-gray-400">Start typing to search for items</p>
+						<!-- Buildings Tab -->
+						{#if buildingSearchResults.length > 0}
+							<div class="space-y-2">
+								{#each buildingSearchResults as recipe (recipe.id)}
+									{@const building = getBuildingDescriptionById(recipe.buildingDescriptionId)}
+									{@const buildingIconUrl = building?.iconAssetName ? getItemIconUrl(building.iconAssetName) : null}
+									{@const isInList = list?.entries.some((e) => isBuildingEntry(e) && e.constructionRecipeId === recipe.id)}
+									<div class="rounded-lg bg-gray-700 p-3">
+										<div class="flex items-center gap-3">
+											<!-- Icon -->
+											<div class="flex h-10 w-10 items-center justify-center rounded bg-gray-600">
+												{#if buildingIconUrl}
+													<img src={buildingIconUrl} alt="" class="h-8 w-8 object-contain" />
+												{:else}
+													<span class="text-lg text-gray-400">🏠</span>
+												{/if}
+											</div>
+
+											<!-- Building info -->
+											<div class="min-w-0 flex-1">
+												<p class="truncate font-medium text-white">{recipe.name}</p>
+												<p class="text-xs text-gray-400">
+													Construction
+													{#if isInList}
+														<span class="ml-2 text-green-400">In list</span>
+													{/if}
+												</p>
+											</div>
+
+											<!-- Quantity and Add -->
+											<div class="flex items-center gap-2">
+												<input
+													type="number"
+													value={getBuildingQuantity(recipe.id)}
+													onchange={(e) =>
+														setBuildingQuantity(recipe.id, parseInt(e.currentTarget.value) || 1)}
+													onwheel={(e) => handleBuildingQuantityWheel(recipe.id, e)}
+													min="1"
+													class="w-20 rounded border border-gray-600 bg-gray-800 px-2 py-1.5 text-center text-white focus:border-blue-500 focus:outline-none"
+												/>
+												<button
+													type="button"
+													onclick={() => handleAddBuilding(recipe.id)}
+													class="rounded-lg px-3 py-1.5 text-white transition-all duration-300 {isBuildingRecentlyAdded(
+														recipe.id
+													)
+														? 'bg-green-600'
+														: 'bg-blue-600 hover:bg-blue-700'}"
+													title={isBuildingRecentlyAdded(recipe.id) ? 'Added!' : 'Add to list'}
+													aria-label={isBuildingRecentlyAdded(recipe.id) ? 'Added to list' : 'Add to list'}
+												>
+													{#if isBuildingRecentlyAdded(recipe.id)}
+														<svg
+															class="h-5 w-5"
+															fill="none"
+															stroke="currentColor"
+															viewBox="0 0 24 24"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																stroke-width="2"
+																d="M5 13l4 4L19 7"
+															/>
+														</svg>
+													{:else}
+														<svg
+															class="h-5 w-5"
+															fill="none"
+															stroke="currentColor"
+															viewBox="0 0 24 24"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																stroke-width="2"
+																d="M12 4v16m8-8H4"
+															/>
+														</svg>
+													{/if}
+												</button>
+											</div>
+										</div>
+
+										<!-- Show consumed items/cargo summary -->
+										{#if recipe.consumedItemStacks.length > 0 || recipe.consumedCargoStacks.length > 0}
+											<div class="mt-2 text-xs text-gray-500">
+												{#if recipe.consumedItemStacks.length > 0}
+													<span>{recipe.consumedItemStacks.length} item{recipe.consumedItemStacks.length > 1 ? 's' : ''}</span>
+												{/if}
+												{#if recipe.consumedCargoStacks.length > 0}
+													{#if recipe.consumedItemStacks.length > 0} · {/if}
+													<span>{recipe.consumedCargoStacks.length} cargo</span>
+												{/if}
+												{#if recipe.consumedBuilding > 0}
+													<span class="ml-1 text-amber-400">(upgrade)</span>
+												{/if}
+											</div>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{:else if searchQuery.length >= 2}
+							<p class="py-8 text-center text-gray-400">No buildings found matching "{searchQuery}"</p>
+						{:else}
+							<p class="py-8 text-center text-gray-400">Start typing to search for buildings</p>
+						{/if}
 					{/if}
 				</div>
 

@@ -3,12 +3,19 @@
  * Persisted to IndexedDB
  */
 
-import type { CraftingList, CraftingListItem, CraftingListEntry, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution, RootItemContribution, ItemListEntry, CargoListEntry } from '$lib/types/app';
-import { isItemEntry, isCargoEntry } from '$lib/types/app';
+import type { CraftingList, CraftingListItem, CraftingListEntry, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution, RootItemContribution, ItemListEntry, CargoListEntry, BuildingListEntry } from '$lib/types/app';
+import { isItemEntry, isCargoEntry, isBuildingEntry } from '$lib/types/app';
 import type { MaterialNode, FlatMaterial, Item, Recipe, Cargo, MaterialNodeType } from '$lib/types/game';
 import { getCachedLists, getCachedList, saveList, deleteList as deleteCachedList, deleteListProgress } from '$lib/services/cache';
-import { gameData, getItemById, getItemWithRecipes, getCargoById } from './game-data.svelte';
+import { gameData, getItemById, getItemWithRecipes, getCargoById, getConstructionRecipeById, getBuildingDescriptionById, findConstructionRecipeByBuildingId } from './game-data.svelte';
 import { allocateMaterialsFromSources, getAggregatedInventoryForSources, getAggregatedCargoForSources } from './inventory.svelte';
+import {
+	type RecipeContext,
+	calculateItemNaturalStep as calcStep,
+	calculateItemProfession as calcProfession,
+	getCargoProfession as getCargoProf,
+	calculateCargoNaturalStep as calcCargoStep
+} from '$lib/utils/recipe-utils';
 
 /**
  * Convert a reactive proxy to a plain object for IndexedDB storage
@@ -37,8 +44,10 @@ function hashListEntries(entries: CraftingListEntry[], recipePreferences?: Map<s
 	const entryHash = entries.map(e => {
 		if (isItemEntry(e)) {
 			return `i:${e.itemId}:${e.quantity}:${e.recipeId || 0}`;
-		} else {
+		} else if (isCargoEntry(e)) {
 			return `c:${e.cargoId}:${e.quantity}`;
+		} else {
+			return `b:${e.constructionRecipeId}:${e.quantity}`;
 		}
 	}).join('|');
 
@@ -72,9 +81,19 @@ async function buildListTrees(list: CraftingList, recipePreferences?: Map<string
 				trees.push(tree);
 			}
 		} else if (isCargoEntry(entry)) {
-			const tree = calculateCargoMaterialTree(
+			const tree = await calculateCargoMaterialTree(
 				entry.cargoId,
-				entry.quantity
+				entry.quantity,
+				recipePreferences
+			);
+			if (tree) {
+				trees.push(tree);
+			}
+		} else if (isBuildingEntry(entry)) {
+			const tree = await calculateBuildingMaterialTree(
+				entry.constructionRecipeId,
+				entry.quantity,
+				recipePreferences
 			);
 			if (tree) {
 				trees.push(tree);
@@ -86,21 +105,179 @@ async function buildListTrees(list: CraftingList, recipePreferences?: Map<string
 }
 
 /**
- * Calculate material tree for a cargo item (always a leaf node)
+ * Calculate material tree for a cargo item.
+ * If the cargo has a crafting recipe, expand it; otherwise treat as leaf node.
+ * @param recipePreferences - Optional map of recipe preferences for items in tree
  */
-function calculateCargoMaterialTree(
+async function calculateCargoMaterialTree(
 	cargoId: number,
-	quantity: number
-): MaterialNode | null {
+	quantity: number,
+	recipePreferences?: Map<string, number>,
+	depth = 0,
+	maxDepth = 50
+): Promise<MaterialNode | null> {
 	const cargo = getCargoById(cargoId);
 	if (!cargo) return null;
+
+	// Check if this cargo has a crafting recipe
+	const cargoRecipes = gameData.cargoRecipes.get(cargoId) || [];
+
+	// No recipes or max depth reached = leaf node (gathered cargo)
+	if (cargoRecipes.length === 0 || depth >= maxDepth) {
+		return {
+			nodeType: 'cargo',
+			cargo,
+			quantity,
+			tier: cargo.tier,
+			children: []
+		};
+	}
+
+	// Select recipe: use preference if available, otherwise cheapest
+	const sortedRecipes = [...cargoRecipes].sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity));
+	let recipe = sortedRecipes[0];
+
+	if (recipePreferences) {
+		const preferredId = recipePreferences.get(`cargo-${cargoId}`);
+		if (preferredId !== undefined) {
+			const preferredRecipe = cargoRecipes.find(r => r.id === preferredId);
+			recipe = preferredRecipe || sortedRecipes[0];
+		}
+	}
+
+	// Calculate craft count
+	const craftCount = Math.ceil(quantity / recipe.outputQuantity);
+
+	// Build children from recipe ingredients
+	const children: MaterialNode[] = [];
+
+	// Process item ingredients
+	for (const ingredient of recipe.ingredients) {
+		const childNode = await calculateMaterialTree(
+			ingredient.itemId,
+			ingredient.quantity * craftCount,
+			undefined,
+			recipePreferences,
+			depth + 1,
+			maxDepth
+		);
+		if (childNode) {
+			children.push(childNode);
+		}
+	}
+
+	// Process cargo ingredients (recursive)
+	if (recipe.cargoIngredients) {
+		for (const cargoIng of recipe.cargoIngredients) {
+			const childNode = await calculateCargoMaterialTree(
+				cargoIng.cargoId,
+				cargoIng.quantity * craftCount,
+				recipePreferences,
+				depth + 1,
+				maxDepth
+			);
+			if (childNode) {
+				children.push(childNode);
+			}
+		}
+	}
 
 	return {
 		nodeType: 'cargo',
 		cargo,
 		quantity,
 		tier: cargo.tier,
-		children: []
+		children,
+		recipeUsed: recipe
+	};
+}
+
+/**
+ * Calculate material tree for a building (construction recipe)
+ * Expands item and cargo ingredients, and handles upgrade chains (consumedBuilding)
+ * @param recipePreferences - Optional map of recipe preferences for items in tree
+ */
+async function calculateBuildingMaterialTree(
+	constructionRecipeId: number,
+	quantity: number,
+	recipePreferences?: Map<string, number>,
+	depth = 0,
+	maxDepth = 50
+): Promise<MaterialNode | null> {
+	const recipe = getConstructionRecipeById(constructionRecipeId);
+	if (!recipe) return null;
+
+	const building = getBuildingDescriptionById(recipe.buildingDescriptionId);
+	if (!building) return null;
+
+	// Prevent infinite recursion
+	if (depth >= maxDepth) {
+		return {
+			nodeType: 'building',
+			building,
+			constructionRecipe: recipe,
+			quantity,
+			tier: 1, // Buildings don't have tiers, default to 1
+			children: []
+		};
+	}
+
+	const children: MaterialNode[] = [];
+
+	// Process item ingredients
+	for (const itemStack of recipe.consumedItemStacks) {
+		const childNode = await calculateMaterialTree(
+			itemStack.itemId,
+			itemStack.quantity * quantity,
+			undefined,
+			recipePreferences,
+			depth + 1,
+			maxDepth
+		);
+		if (childNode) {
+			children.push(childNode);
+		}
+	}
+
+	// Process cargo ingredients (may have their own recipes)
+	for (const cargoStack of recipe.consumedCargoStacks) {
+		const childNode = await calculateCargoMaterialTree(
+			cargoStack.cargoId,
+			cargoStack.quantity * quantity,
+			recipePreferences,
+			depth + 1,
+			maxDepth
+		);
+		if (childNode) {
+			children.push(childNode);
+		}
+	}
+
+	// Process consumed building (upgrade chain)
+	if (recipe.consumedBuilding > 0) {
+		// Find the construction recipe that builds the consumed building
+		const baseRecipe = findConstructionRecipeByBuildingId(recipe.consumedBuilding);
+		if (baseRecipe) {
+			const baseNode = await calculateBuildingMaterialTree(
+				baseRecipe.id,
+				quantity,
+				recipePreferences,
+				depth + 1,
+				maxDepth
+			);
+			if (baseNode) {
+				children.push(baseNode);
+			}
+		}
+	}
+
+	return {
+		nodeType: 'building',
+		building,
+		constructionRecipe: recipe,
+		quantity,
+		tier: 1, // Buildings don't have tiers
+		children
 	};
 }
 
@@ -146,6 +323,9 @@ function getNodeKey(node: MaterialNode): string {
 	if (node.nodeType === 'cargo') {
 		return `cargo-${node.cargo!.id}`;
 	}
+	if (node.nodeType === 'building') {
+		return `building-${node.constructionRecipe!.id}`;
+	}
 	return `item-${node.item!.id}`;
 }
 
@@ -155,6 +335,9 @@ function getNodeKey(node: MaterialNode): string {
 function getNodeId(node: MaterialNode): number {
 	if (node.nodeType === 'cargo') {
 		return node.cargo!.id;
+	}
+	if (node.nodeType === 'building') {
+		return node.constructionRecipe!.id;
 	}
 	return node.item!.id;
 }
@@ -203,7 +386,7 @@ function computeRemainingNeeds(
 	function traverse(node: MaterialNode, neededQuantity: number): void {
 		const nodeKey = getNodeKey(node);
 
-		// Handle cargo nodes - they now have inventory tracking
+		// Handle cargo nodes - they now have inventory tracking AND can have children (recipes)
 		if (node.nodeType === 'cargo') {
 			const cargoId = node.cargo!.id;
 
@@ -225,7 +408,52 @@ function computeRemainingNeeds(
 			existing.baseRequired += neededQuantity;
 			existing.remaining += stillNeeded;
 			needs.set(nodeKey, existing);
-			// Cargo has no children, so we're done
+
+			// Handle cargo children (if this cargo has a crafting recipe)
+			if (node.children.length > 0 && node.recipeUsed) {
+				const originalCraftCount = Math.ceil(node.quantity / node.recipeUsed.outputQuantity);
+
+				if (stillNeeded > 0) {
+					// Partial coverage: recurse with reduced child needs
+					const craftCount = Math.ceil(stillNeeded / node.recipeUsed.outputQuantity);
+
+					for (const child of node.children) {
+						const childKey = getNodeKey(child);
+						const childOriginal = child.quantity;
+						const childNeeded = Math.ceil(childOriginal * craftCount / originalCraftCount);
+						const childCoverage = childOriginal - childNeeded;
+
+						// Record partial coverage from this cargo's inventory
+						if (childCoverage > 0 && useFromInventory > 0) {
+							recordContribution(childKey, nodeKey, useFromInventory, childCoverage);
+							if (child.children.length > 0 && childCoverage > 0) {
+								const coveredRatio = childCoverage / childOriginal;
+								recordPartialCoverageForDescendants(child, nodeKey, useFromInventory, coveredRatio);
+							}
+						}
+
+						traverse(child, childNeeded);
+					}
+				} else if (useFromInventory > 0) {
+					// Full coverage: record coverage for ALL descendants in subtree
+					recordCoverageForDescendants(node, nodeKey, useFromInventory);
+				}
+			}
+			return;
+		}
+
+		// Handle building nodes - no inventory tracking, always need to build
+		if (node.nodeType === 'building') {
+			// Buildings always need to be constructed (no inventory)
+			const existing = needs.get(nodeKey) || { baseRequired: 0, remaining: 0 };
+			existing.baseRequired += neededQuantity;
+			existing.remaining += neededQuantity; // Always need full amount
+			needs.set(nodeKey, existing);
+
+			// Process children (item and cargo requirements)
+			for (const child of node.children) {
+				traverse(child, child.quantity);
+			}
 			return;
 		}
 
@@ -498,6 +726,35 @@ export async function addCargoToList(listId: string, cargoId: number, quantity: 
 }
 
 /**
+ * Add building (construction recipe) to a list
+ */
+export async function addBuildingToList(listId: string, constructionRecipeId: number, quantity: number): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	// Check if building entry already exists
+	const existingEntry = list.entries.find(
+		(e) => isBuildingEntry(e) && e.constructionRecipeId === constructionRecipeId
+	);
+
+	if (existingEntry) {
+		existingEntry.quantity += quantity;
+	} else {
+		const newEntry: BuildingListEntry = {
+			id: crypto.randomUUID(),
+			type: 'building',
+			constructionRecipeId,
+			quantity,
+			addedAt: Date.now()
+		};
+		list.entries.push(newEntry);
+	}
+
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
+
+/**
  * Update entry quantity in a list
  */
 export async function updateEntryQuantity(
@@ -711,18 +968,18 @@ export async function calculateMaterialTree(
 		}
 	}
 
-	// Process cargo ingredients (these are always leaf nodes)
+	// Process cargo ingredients (may have their own recipes)
 	if (recipe.cargoIngredients) {
 		for (const cargoIng of recipe.cargoIngredients) {
-			const cargo = getCargoById(cargoIng.cargoId);
-			if (cargo) {
-				children.push({
-					nodeType: 'cargo',
-					cargo,
-					quantity: cargoIng.quantity * craftCount,
-					tier: cargo.tier,
-					children: []
-				});
+			const childNode = await calculateCargoMaterialTree(
+				cargoIng.cargoId,
+				cargoIng.quantity * craftCount,
+				recipePreferences,
+				depth + 1,
+				maxDepth
+			);
+			if (childNode) {
+				children.push(childNode);
 			}
 		}
 	}
@@ -743,15 +1000,46 @@ export async function calculateMaterialTree(
 const itemStepCache = new Map<number, number>();
 
 /**
+ * Cache for cargo step calculations (based on recipe structure)
+ */
+const cargoStepCache = new Map<number, number>();
+
+/**
  * Cache for item profession calculations
  */
 const itemProfessionCache = new Map<number, string>();
 
 /**
+ * Clear step and profession caches.
+ * Should be called when game data is loaded or refreshed to prevent stale values.
+ */
+export function clearRecipeCaches(): void {
+	itemStepCache.clear();
+	cargoStepCache.clear();
+	itemProfessionCache.clear();
+	listTreeCache.clear(); // Also clear tree cache since trees depend on game data
+	console.log('Recipe and tree caches cleared');
+}
+
+/**
+ * Build a RecipeContext from current gameData state.
+ * Used to call the pure utility functions.
+ */
+function buildRecipeContext(): RecipeContext {
+	return {
+		items: gameData.items,
+		recipes: gameData.recipes,
+		cargoRecipes: gameData.cargoRecipes,
+		cargos: gameData.cargos,
+		cargoToSkill: gameData.cargoToSkill,
+		itemToCargoSkill: gameData.itemToCargoSkill,
+		itemFromListToSkill: gameData.itemFromListToSkill
+	};
+}
+
+/**
  * Get the profession/skill for an item based on its cheapest recipe.
- * For raw materials (step 1), uses the item's tag.
- * For crafted items, uses the first level requirement's skill name.
- * For cargo-derived items, uses the cargo source gathering skill.
+ * Uses the pure utility function with caching.
  */
 function getItemProfession(itemId: number): string {
 	// Check cache first
@@ -759,160 +1047,45 @@ function getItemProfession(itemId: number): string {
 		return itemProfessionCache.get(itemId)!;
 	}
 
-	const item = getItemById(itemId);
-	if (!item) {
-		itemProfessionCache.set(itemId, 'Unknown');
-		return 'Unknown';
-	}
-
-	// Check if this item is derived from cargo (e.g., Ferralith Ore Piece from Ferralith Ore Cargo)
-	// This takes priority over other methods to ensure cargo-derived items
-	// show their source gathering profession (Mining, etc.)
-	const cargoSourceSkill = gameData.itemToCargoSkill.get(itemId);
-	if (cargoSourceSkill) {
-		itemProfessionCache.set(itemId, cargoSourceSkill);
-		return cargoSourceSkill;
-	}
-
-	// Check if this item comes from an item list (e.g., Fish Oil from "Breezy Fin Darter Products")
-	// Item lists are produced by crafting recipes with a specific skill
-	const listSourceSkill = gameData.itemFromListToSkill.get(itemId);
-	if (listSourceSkill) {
-		itemProfessionCache.set(itemId, listSourceSkill);
-		return listSourceSkill;
-	}
-
-	// Get recipes for this item
-	const itemDetails = getItemWithRecipes(itemId);
-	const allRecipes = itemDetails?.craftingRecipes || [];
-
-	// Filter to valid recipes (same logic as getItemNaturalStep)
-	const validRecipes = allRecipes.filter(recipe => {
-		// Must have some ingredients (item or cargo)
-		const hasItemIngredients = recipe.ingredients.length > 0;
-		const hasCargoIngredients = (recipe.cargoIngredients?.length ?? 0) > 0;
-		if (!hasItemIngredients && !hasCargoIngredients) return false;
-
-		// All item ingredients must be valid Items
-		if (hasItemIngredients && !recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
-
-		// Filter downgrade recipes (only applies to item ingredients)
-		if (item.tier === -1) return true;
-		return !recipe.ingredients.some(ing => {
-			const ingItem = getItemById(ing.itemId);
-			if (!ingItem || ingItem.tier === -1) return false;
-			return ingItem.tier > item.tier;
-		});
-	});
-
-	// No valid crafting recipes
-	if (validRecipes.length === 0) {
-		// Try extraction recipes first (for gathered/mined materials)
-		const extractionRecipes = itemDetails?.extractionRecipes || [];
-		if (extractionRecipes.length > 0 && extractionRecipes[0].levelRequirements?.[0]?.skillName) {
-			const profession = extractionRecipes[0].levelRequirements[0].skillName;
-			itemProfessionCache.set(itemId, profession);
-			return profession;
-		}
-
-		// Try related skills
-		const relatedSkills = itemDetails?.relatedSkills || [];
-		if (relatedSkills.length > 0 && relatedSkills[0].name) {
-			const profession = relatedSkills[0].name;
-			itemProfessionCache.set(itemId, profession);
-			return profession;
-		}
-
-		// Fall back to 'Gathering' for raw materials
-		itemProfessionCache.set(itemId, 'Gathering');
-		return 'Gathering';
-	}
-
-	// Sort by cost and pick cheapest recipe
-	const sortedRecipes = [...validRecipes].sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity));
-	const recipe = sortedRecipes[0];
-
-	// Get profession from level requirements
-	const profession = recipe.levelRequirements?.[0]?.skillName || recipe.craftingStationName || item.tag || 'Crafting';
+	const ctx = buildRecipeContext();
+	const profession = calcProfession(itemId, ctx, gameData.extractionRecipes);
 	itemProfessionCache.set(itemId, profession);
 	return profession;
 }
 
 /**
  * Calculate the natural step for an item based on its cheapest recipe.
- * Uses the defaultRecipeId (pre-computed cheapest recipe) for consistency
- * with material tree calculations.
+ * Uses the pure utility function with caching.
  * Step 1 = raw materials (no recipe), Step N = max(ingredient steps) + 1
  */
-function getItemNaturalStep(itemId: number, visited: Set<number> = new Set()): number {
+function getItemNaturalStep(itemId: number): number {
 	// Check cache first
 	if (itemStepCache.has(itemId)) {
 		return itemStepCache.get(itemId)!;
 	}
 
-	// Prevent infinite recursion for circular recipes
-	if (visited.has(itemId)) {
-		return 1;
-	}
-	visited.add(itemId);
-
-	const item = getItemById(itemId);
-	if (!item) {
-		itemStepCache.set(itemId, 1);
-		return 1;
-	}
-
-	// Get recipes for this item
-	const itemDetails = getItemWithRecipes(itemId);
-	const allRecipes = itemDetails?.craftingRecipes || [];
-
-	// Filter recipes to only valid "upgrade" crafting recipes:
-	// 1. Must have some ingredients (item or cargo)
-	// 2. All item ingredients must be valid Items (can be looked up)
-	// 3. Not a downgrade recipe (output tier >= all input tiers)
-	const validRecipes = allRecipes.filter(recipe => {
-		// Must have some ingredients (item or cargo)
-		const hasItemIngredients = recipe.ingredients.length > 0;
-		const hasCargoIngredients = (recipe.cargoIngredients?.length ?? 0) > 0;
-		if (!hasItemIngredients && !hasCargoIngredients) return false;
-
-		// All item ingredients must be valid Items
-		if (hasItemIngredients && !recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
-
-		// Filter downgrade recipes (only applies to item ingredients)
-		if (item.tier === -1) return true; // Ignore tier -1 output items
-
-		return !recipe.ingredients.some(ing => {
-			const ingItem = getItemById(ing.itemId);
-			if (!ingItem || ingItem.tier === -1) return false; // Ignore tier -1 ingredients
-			return ingItem.tier > item.tier;
-		});
-	});
-
-	// No valid recipes = raw material = step 1
-	if (validRecipes.length === 0) {
-		itemStepCache.set(itemId, 1);
-		return 1;
-	}
-
-	// Sort by cost and pick cheapest recipe
-	const sortedRecipes = [...validRecipes].sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity));
-	const recipe = sortedRecipes[0];
-
-	// Calculate step from the cheapest recipe's ingredients
-	let maxIngredientStep = 0;
-	for (const ing of recipe.ingredients) {
-		const ingStep = getItemNaturalStep(ing.itemId, new Set(visited));
-		maxIngredientStep = Math.max(maxIngredientStep, ingStep);
-	}
-
-	// Cargo ingredients are step 1, so if we have cargo, min step is 1
-	if (recipe.cargoIngredients && recipe.cargoIngredients.length > 0) {
-		maxIngredientStep = Math.max(maxIngredientStep, 1);
-	}
-
-	const step = maxIngredientStep + 1;
+	const ctx = buildRecipeContext();
+	const step = calcStep(itemId, ctx, new Set(), itemStepCache);
+	// Note: calcStep already populates the cache, but we ensure it's set
 	itemStepCache.set(itemId, step);
+	return step;
+}
+
+/**
+ * Calculate the natural step for a cargo based on its cheapest recipe.
+ * Uses the pure utility function with caching.
+ * Step 1 = gathered cargo (no recipe), Step N = max(ingredient steps) + 1
+ */
+function getCargoNaturalStep(cargoId: number): number {
+	// Check cache first
+	if (cargoStepCache.has(cargoId)) {
+		return cargoStepCache.get(cargoId)!;
+	}
+
+	const ctx = buildRecipeContext();
+	const step = calcCargoStep(cargoId, ctx, new Set(), new Set(), itemStepCache, cargoStepCache);
+	// Note: calcCargoStep already populates the cache, but we ensure it's set
+	cargoStepCache.set(cargoId, step);
 	return step;
 }
 
@@ -933,14 +1106,19 @@ function getMaterialKey(node: MaterialNode): string {
 	if (node.nodeType === 'cargo') {
 		return `cargo-${node.cargo!.id}`;
 	}
+	if (node.nodeType === 'building') {
+		return `building-${node.constructionRecipe!.id}`;
+	}
 	return `item-${node.item!.id}`;
 }
 
 /**
- * Get profession for a cargo node
+ * Get profession for a cargo node.
+ * Uses the pure utility function.
  */
 function getCargoProfession(cargoId: number): string {
-	return gameData.cargoToSkill.get(cargoId) || 'Gathering';
+	const ctx = buildRecipeContext();
+	return getCargoProf(cargoId, ctx);
 }
 
 /**
@@ -959,9 +1137,18 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 		let profession: string;
 
 		if (node.nodeType === 'cargo') {
-			// Cargo is always step 1 (gathered)
-			step = 1;
+			// Cargo step calculated from recipes (crafted cargo like Timber) or step 1 (gathered)
+			step = getCargoNaturalStep(node.cargo!.id);
 			profession = getCargoProfession(node.cargo!.id);
+		} else if (node.nodeType === 'building') {
+			// Buildings are construction (highest step above their materials)
+			// Calculate step based on children's max step + 1
+			step = node.children.length === 0 ? 1 : 1 + Math.max(...node.children.map(c => {
+				if (c.nodeType === 'cargo') return getCargoNaturalStep(c.cargo!.id);
+				if (c.nodeType === 'building') return getNodeStep(c);
+				return getItemNaturalStep(c.item!.id);
+			}));
+			profession = 'Construction';
 		} else {
 			// Item - use existing logic
 			step = getItemNaturalStep(node.item!.id);
@@ -981,6 +1168,20 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 							nodeType: 'cargo',
 							cargoId: node.cargo!.id,
 							cargo: node.cargo,
+							quantity: node.quantity,
+							tier: node.tier,
+							step: step,
+							profession: profession
+						},
+						minStep: step
+					});
+				} else if (node.nodeType === 'building') {
+					materials.set(nodeKey, {
+						material: {
+							nodeType: 'building',
+							buildingId: node.constructionRecipe!.id,
+							building: node.building,
+							constructionRecipe: node.constructionRecipe,
 							quantity: node.quantity,
 							tier: node.tier,
 							step: step,
@@ -1193,10 +1394,14 @@ export async function calculateListRequirements(
 			const rootItem = getItemById(entry.itemId);
 			rootName = rootItem?.name || `Item #${entry.itemId}`;
 			rootId = entry.itemId;
-		} else {
+		} else if (isCargoEntry(entry)) {
 			const rootCargo = getCargoById(entry.cargoId);
 			rootName = rootCargo?.name || `Cargo #${entry.cargoId}`;
 			rootId = entry.cargoId;
+		} else {
+			// Building entry - will be handled when building support is added
+			rootName = `Building #${entry.constructionRecipeId}`;
+			rootId = entry.constructionRecipeId;
 		}
 
 		const flattened = flattenMaterialTree(tree);
@@ -1230,7 +1435,7 @@ export async function calculateListRequirements(
 	optimizeBatchQuantities(flatMaterials, itemEntries);
 
 	// Aggregate parent contributions by parent node key
-	// Only works for items (parent contributions track item inventory, not cargo)
+	// Works for both item and cargo parents
 	function aggregateContributions(materialKey: string): ParentContribution[] | undefined {
 		const contributions = rawContributions.get(materialKey);
 		if (!contributions || contributions.length === 0) return undefined;
@@ -1251,10 +1456,10 @@ export async function calculateListRequirements(
 			}
 		}
 
-		// Convert to ParentContribution[] - only include item parents (not cargo)
+		// Convert to ParentContribution[] - include both item and cargo parents
 		const result: ParentContribution[] = [];
 		for (const [parentKey, data] of byParent) {
-			// Parse parent key to get item ID (only for items, format: "item-123")
+			// Parse parent key to get item ID (format: "item-123")
 			if (parentKey.startsWith('item-')) {
 				const parentItemId = parseInt(parentKey.substring(5), 10);
 				if (!isNaN(parentItemId)) {
@@ -1265,7 +1470,17 @@ export async function calculateListRequirements(
 					});
 				}
 			}
-			// Skip cargo parents as they don't have inventory tracking
+			// Parse parent key to get cargo ID (format: "cargo-123")
+			else if (parentKey.startsWith('cargo-')) {
+				const parentCargoId = parseInt(parentKey.substring(6), 10);
+				if (!isNaN(parentCargoId)) {
+					result.push({
+						parentCargoId,
+						parentQuantityUsed: data.parentQuantityUsed,
+						coverage: data.coverage
+					});
+				}
+			}
 		}
 
 		return result.length > 0 ? result : undefined;

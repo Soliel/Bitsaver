@@ -5,7 +5,7 @@
 import type { Item, FlatMaterial, Cargo } from './game';
 
 // List entry type discriminator
-export type ListEntryType = 'item' | 'cargo';
+export type ListEntryType = 'item' | 'cargo' | 'building';
 
 // Base properties for all list entries
 interface ListEntryBase {
@@ -28,8 +28,14 @@ export interface CargoListEntry extends ListEntryBase {
 	cargoId: number;
 }
 
+// Building entry (for construction goals)
+export interface BuildingListEntry extends ListEntryBase {
+	type: 'building';
+	constructionRecipeId: number; // ID from construction_recipe_desc.json
+}
+
 // Unified list entry type
-export type CraftingListEntry = ItemListEntry | CargoListEntry;
+export type CraftingListEntry = ItemListEntry | CargoListEntry | BuildingListEntry;
 
 // Crafting list
 export interface CraftingList {
@@ -52,10 +58,11 @@ export interface CraftingListItem {
 	addedAt: number;
 }
 
-// Tracks how much of an item's need is covered by having parent items
+// Tracks how much of an item's need is covered by having parent items/cargo
 export interface ParentContribution {
-	parentItemId: number;
-	parentQuantityUsed: number; // How many of the parent item contributed
+	parentItemId?: number; // Present when parent is an item
+	parentCargoId?: number; // Present when parent is a cargo
+	parentQuantityUsed: number; // How many of the parent item/cargo contributed
 	coverage: number; // How many units of THIS item are covered
 }
 
@@ -123,8 +130,10 @@ export interface ListProgress {
 	listId: string; // Primary key, matches CraftingList.id
 	manualHave: [number, number][]; // Serialized Map<itemId, quantity> (legacy, items only)
 	manualHaveCargo?: [number, number][]; // Serialized Map<cargoId, quantity>
+	manualHaveBuilding?: [number, number][]; // Serialized Map<constructionRecipeId, quantity>
 	checkedOff: number[]; // Serialized Set<itemId> (legacy, items only)
 	checkedOffCargo?: number[]; // Serialized Set<cargoId>
+	checkedOffBuilding?: number[]; // Serialized Set<constructionRecipeId>
 	recipePreferences?: [string, number][]; // Serialized Map<materialKey, recipeId>
 	hideCompleted: boolean;
 	viewMode: ListViewMode;
@@ -139,6 +148,10 @@ export function isItemEntry(entry: CraftingListEntry): entry is ItemListEntry {
 
 export function isCargoEntry(entry: CraftingListEntry): entry is CargoListEntry {
 	return entry.type === 'cargo';
+}
+
+export function isBuildingEntry(entry: CraftingListEntry): entry is BuildingListEntry {
+	return entry.type === 'building';
 }
 
 // Player's accessible claim info

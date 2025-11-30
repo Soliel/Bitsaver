@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { inventory, getAggregatedInventoryForSources, getAggregatedCargoForSources } from '$lib/state/inventory.svelte';
-	import { getItemById } from '$lib/state/game-data.svelte';
+	import { getItemById, getCargoById } from '$lib/state/game-data.svelte';
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import type { ParentContribution } from '$lib/types/app';
 
@@ -79,15 +79,32 @@
 
 	const totalFromInventory = $derived(breakdown.reduce((sum, s) => sum + s.quantity, 0));
 
-	// Enrich parent contributions with item details
+	// Enrich parent contributions with item/cargo details
 	const parentDetails = $derived.by(() => {
 		if (!parentContributions || parentContributions.length === 0) return [];
 		return parentContributions.map(c => {
-			const item = getItemById(c.parentItemId);
+			if (c.parentItemId !== undefined) {
+				const item = getItemById(c.parentItemId);
+				return {
+					...c,
+					name: item?.name || `Item #${c.parentItemId}`,
+					iconUrl: item ? getItemIconUrl(item.iconAssetName) : null,
+					isCargo: false
+				};
+			} else if (c.parentCargoId !== undefined) {
+				const cargo = getCargoById(c.parentCargoId);
+				return {
+					...c,
+					name: cargo?.name || `Cargo #${c.parentCargoId}`,
+					iconUrl: cargo ? getItemIconUrl(cargo.iconAssetName) : null,
+					isCargo: true
+				};
+			}
 			return {
 				...c,
-				name: item?.name || `Item #${c.parentItemId}`,
-				iconUrl: item ? getItemIconUrl(item.iconAssetName) : null
+				name: 'Unknown',
+				iconUrl: null,
+				isCargo: false
 			};
 		});
 	});
@@ -213,18 +230,18 @@
 			<div class="mt-2 pt-2 border-t border-gray-700">
 				<div class="text-xs text-gray-400 mb-1.5">Covered by intermediate crafts</div>
 				<div class="space-y-1.5">
-					{#each parentDetails as parent (parent.parentItemId)}
+					{#each parentDetails as parent, i (parent.parentItemId ?? parent.parentCargoId ?? i)}
 						<div class="flex items-center gap-2 text-sm">
 							{#if parent.iconUrl}
 								<img src={parent.iconUrl} alt="" class="h-4 w-4 object-contain flex-shrink-0" />
 							{/if}
-							<span class="text-purple-300 truncate flex-1" title={parent.name}>
+							<span class="{parent.isCargo ? 'text-amber-300' : 'text-purple-300'} truncate flex-1" title={parent.name}>
 								{parent.name}
 							</span>
 							<span class="text-gray-400 text-xs flex-shrink-0">
 								(x{parent.parentQuantityUsed})
 							</span>
-							<span class="text-purple-400 font-medium flex-shrink-0">
+							<span class="{parent.isCargo ? 'text-amber-400' : 'text-purple-400'} font-medium flex-shrink-0">
 								{parent.coverage}
 							</span>
 						</div>

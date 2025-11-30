@@ -135,6 +135,27 @@ export interface CargoIngredient {
 	quantity: number;
 }
 
+// Construction recipe (from construction_recipe_desc.json)
+export interface ConstructionRecipe {
+	id: number;
+	name: string;
+	buildingDescriptionId: number;
+	consumedItemStacks: RecipeIngredient[];
+	consumedCargoStacks: CargoIngredient[];
+	consumedBuilding: number; // building_description_id of base building (0 = none, for upgrades)
+	levelRequirements: LevelRequirement[];
+	toolRequirements: ToolRequirement[];
+}
+
+// Building description (from building_desc.json)
+export interface BuildingDescription {
+	id: number;
+	name: string;
+	description: string;
+	iconAssetName: string;
+	functions: BuildingFunction[];
+}
+
 // Building from /api/buildings
 export interface Building {
 	entityId: string;
@@ -165,13 +186,15 @@ export interface BuildingFunction {
 }
 
 // Node type discriminator for material trees
-export type MaterialNodeType = 'item' | 'cargo';
+export type MaterialNodeType = 'item' | 'cargo' | 'building';
 
 // Material tree node for crafting calculations
 export interface MaterialNode {
 	nodeType: MaterialNodeType;
 	item?: Item; // Present when nodeType === 'item'
 	cargo?: Cargo; // Present when nodeType === 'cargo'
+	building?: BuildingDescription; // Present when nodeType === 'building'
+	constructionRecipe?: ConstructionRecipe; // Present when nodeType === 'building'
 	quantity: number;
 	tier: number;
 	children: MaterialNode[];
@@ -183,8 +206,11 @@ export interface FlatMaterial {
 	nodeType: MaterialNodeType;
 	itemId?: number; // Present when nodeType === 'item'
 	cargoId?: number; // Present when nodeType === 'cargo'
+	buildingId?: number; // Present when nodeType === 'building' (construction recipe ID)
 	item?: Item; // Present when nodeType === 'item'
 	cargo?: Cargo; // Present when nodeType === 'cargo'
+	building?: BuildingDescription; // Present when nodeType === 'building'
+	constructionRecipe?: ConstructionRecipe; // Present when nodeType === 'building'
 	quantity: number;
 	tier: number;
 	step: number; // 1 = raw/gathered materials, 2+ = crafted from previous step

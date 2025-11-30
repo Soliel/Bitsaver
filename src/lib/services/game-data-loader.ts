@@ -4,7 +4,7 @@
  */
 
 // Bump this version when data loading logic changes to force cache refresh
-export const DATA_LOADER_VERSION = 12;
+export const DATA_LOADER_VERSION = 15;
 
 import type {
 	Item,
@@ -17,7 +17,10 @@ import type {
 	ToolTypeInfo,
 	BuildingTypeInfo,
 	MaterialCostsData,
-	Cargo
+	Cargo,
+	ConstructionRecipe,
+	BuildingDescription,
+	BuildingFunction
 } from '$lib/types/game';
 
 // Manifest structure
@@ -148,6 +151,58 @@ interface RawItemWithListId {
 	item_list_id: number;
 }
 
+interface RawConstructionRecipe {
+	id: number;
+	name: string;
+	building_description_id: number;
+	consumed_building: number;
+	consumed_item_stacks?: Array<{
+		item_id: number;
+		quantity: number;
+		item_type: string;
+	}>;
+	consumed_cargo_stacks?: Array<{
+		item_id: number; // Note: this is cargo ID despite field name
+		quantity: number;
+		item_type: string;
+	}>;
+	level_requirements?: Array<{
+		skill_id: number;
+		level: number;
+	}>;
+	tool_requirements?: Array<{
+		tool_type: number;
+		level: number;
+		power: number;
+	}>;
+	required_knowledges?: number[];
+}
+
+interface RawBuildingDescription {
+	id: number;
+	name: string;
+	description: string;
+	icon_asset_name: string;
+	functions?: Array<{
+		function_type: number;
+		level: number;
+		crafting_slots: number;
+		storage_slots: number;
+		cargo_slots: number;
+		refining_slots: number;
+		refining_cargo_slots?: number;
+		item_slot_size: number;
+		cargo_slot_size: number;
+		trade_orders: number;
+		allowed_item_id_per_slot: number[];
+		buff_ids: number[];
+		concurrent_crafts_per_player: number;
+		terraform: boolean;
+		housing_slots: number;
+		housing_income: number;
+	}>;
+}
+
 // Cargo tag to skill mapping (for cargo not in resource on_destroy_yield)
 const CARGO_TAG_TO_SKILL: Record<string, string> = {
 	'Ocean Fish': 'Fishing',
@@ -218,6 +273,7 @@ export async function loadAllGameData(): Promise<{
 	items: Map<number, Item>;
 	cargos: Map<number, Cargo>;
 	recipes: Map<number, Recipe[]>;
+	cargoRecipes: Map<number, Recipe[]>;
 	extractionRecipes: Map<number, Recipe[]>;
 	cargoToSkill: Map<number, string>;
 	itemToCargoSkill: Map<number, string>;
@@ -225,9 +281,11 @@ export async function loadAllGameData(): Promise<{
 	skills: Map<number, SkillInfo>;
 	toolTypes: Map<number, ToolTypeInfo>;
 	buildingTypes: Map<number, BuildingTypeInfo>;
+	constructionRecipes: Map<number, ConstructionRecipe>;
+	buildingDescriptions: Map<number, BuildingDescription>;
 }> {
 	// Fetch all JSON files in parallel (including optional material costs)
-	const [rawItems, rawRecipes, rawExtractionRecipes, rawResources, rawCargos, rawItemLists, rawSkills, rawToolTypes, rawBuildingTypes, materialCosts] =
+	const [rawItems, rawRecipes, rawExtractionRecipes, rawResources, rawCargos, rawItemLists, rawSkills, rawToolTypes, rawBuildingTypes, rawConstructionRecipes, rawBuildingDescriptions, materialCosts] =
 		await Promise.all([
 			fetchJson<RawItem[]>('item_desc.json'),
 			fetchJson<RawRecipe[]>('crafting_recipe_desc.json'),
@@ -238,6 +296,8 @@ export async function loadAllGameData(): Promise<{
 			fetchJson<RawSkill[]>('skill_desc.json'),
 			fetchJson<RawToolType[]>('tool_type_desc.json'),
 			fetchJson<RawBuildingType[]>('building_type_desc.json'),
+			fetchJson<RawConstructionRecipe[]>('construction_recipe_desc.json'),
+			fetchJson<RawBuildingDescription[]>('building_desc.json'),
 			fetchMaterialCosts()
 		]);
 
@@ -257,11 +317,25 @@ export async function loadAllGameData(): Promise<{
 	// Pass rawItems and rawItemLists to resolve "Output" items to real items
 	const recipes = parseRecipes(rawRecipes, skills, toolTypes, buildingTypes, rawCargos, rawItems, rawItemLists);
 
+	// Parse cargo recipes (recipes that produce cargo outputs like Timber, Brick Slab)
+	const cargoRecipes = parseCargoRecipes(rawRecipes, skills, toolTypes, buildingTypes);
+
 	// Parse extraction recipes
 	const extractionRecipes = parseExtractionRecipes(rawExtractionRecipes, skills, toolTypes);
 
 	// Build cargoToSkill mapping: cargo_id -> skill_name
+	// First, build from gathering/extraction (resource yields)
 	const cargoToSkill = buildCargoToSkillMap(rawResources, rawCargos, rawExtractionRecipes, skills);
+
+	// Second, build from crafting recipes (cargo outputs like Timber, Brick Slab)
+	const cargoCraftingSkill = buildCargoCraftingSkillMap(rawRecipes, skills);
+
+	// Merge: crafting skills fill gaps where gathering doesn't apply
+	for (const [cargoId, craftingSkill] of cargoCraftingSkill) {
+		if (!cargoToSkill.has(cargoId)) {
+			cargoToSkill.set(cargoId, craftingSkill);
+		}
+	}
 
 	// Build itemToCargoSkill mapping: output item ID -> cargo source skill name
 	// For items produced by processing Cargo (e.g., Fish Oil from Fish Cargo)
@@ -271,12 +345,16 @@ export async function loadAllGameData(): Promise<{
 	// For items that come from opening item list reference items (e.g., Fish Oil from "Breezy Fin Darter Products")
 	const itemFromListToSkill = buildItemFromListToSkillMap(rawItems, rawRecipes, rawItemLists, skills);
 
+	// Parse construction recipes and building descriptions
+	const constructionRecipes = parseConstructionRecipes(rawConstructionRecipes, skills, toolTypes);
+	const buildingDescriptions = parseBuildingDescriptions(rawBuildingDescriptions);
+
 	// Merge material costs into items and recipes if available
 	if (materialCosts) {
 		mergeMaterialCosts(items, recipes, materialCosts);
 	}
 
-	return { items, cargos, recipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, skills, toolTypes, buildingTypes };
+	return { items, cargos, recipes, cargoRecipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, skills, toolTypes, buildingTypes, constructionRecipes, buildingDescriptions };
 }
 
 /**
@@ -534,6 +612,109 @@ function parseRecipes(
 }
 
 /**
+ * Parse recipes that produce cargo outputs (Timber, Brick Slab, etc.)
+ * These are grouped by output cargo ID
+ */
+function parseCargoRecipes(
+	rawRecipes: RawRecipe[],
+	skills: Map<number, SkillInfo>,
+	toolTypes: Map<number, ToolTypeInfo>,
+	buildingTypes: Map<number, BuildingTypeInfo>
+): Map<number, Recipe[]> {
+	const recipesByCargo = new Map<number, Recipe[]>();
+
+	for (const raw of rawRecipes) {
+		// Skip recipes with no output
+		if (!raw.crafted_item_stacks || raw.crafted_item_stacks.length === 0) {
+			continue;
+		}
+
+		// Skip recipes from excluded buildings (e.g., Scrap Bench)
+		if (raw.building_requirement && EXCLUDED_BUILDING_TYPES.has(raw.building_requirement.building_type)) {
+			continue;
+		}
+
+		// Skip recipes that require blocked knowledges (e.g., "The Art of Cheating")
+		if (raw.required_knowledges?.some(k => BLOCKED_KNOWLEDGE_IDS.has(k))) {
+			continue;
+		}
+
+		// Only consider Cargo outputs
+		const cargoOutput = raw.crafted_item_stacks.find((s) => s.item_type === 'Cargo');
+		if (!cargoOutput) {
+			continue;
+		}
+
+		// Parse item ingredients
+		const ingredients: RecipeIngredient[] = (raw.consumed_item_stacks || [])
+			.filter((s) => s.item_type === 'Item')
+			.map((s) => ({
+				itemId: s.item_id,
+				quantity: s.quantity
+			}));
+
+		// Parse cargo ingredients
+		const cargoIngredients: CargoIngredient[] = (raw.consumed_item_stacks || [])
+			.filter((s) => s.item_type === 'Cargo')
+			.map((s) => ({
+				cargoId: s.item_id,
+				quantity: s.quantity
+			}));
+
+		// Parse level requirements with skill names
+		const levelRequirements: LevelRequirement[] = (raw.level_requirements || []).map((lr) => {
+			const skill = skills.get(lr.skill_id);
+			return {
+				level: lr.level,
+				skillId: lr.skill_id,
+				skillName: skill?.name || 'Unknown',
+				skillIcon: '',
+				skillTitle: skill?.title || ''
+			};
+		});
+
+		// Parse tool requirements with tool names
+		const toolRequirements: ToolRequirement[] = (raw.tool_requirements || []).map((tr) => {
+			const toolType = toolTypes.get(tr.tool_type);
+			return {
+				level: tr.level,
+				power: tr.power,
+				toolType: tr.tool_type,
+				name: toolType?.name || 'Unknown',
+				skillId: toolType?.skillId || 0
+			};
+		});
+
+		// Get crafting station info
+		const buildingType = raw.building_requirement
+			? buildingTypes.get(raw.building_requirement.building_type)
+			: undefined;
+
+		// Use outputItemId field to store cargo ID (Recipe type reused)
+		const recipe: Recipe = {
+			id: raw.id,
+			name: raw.name,
+			outputItemId: cargoOutput.item_id, // This is actually outputCargoId
+			outputQuantity: cargoOutput.quantity,
+			craftingStationId: raw.building_requirement?.building_type,
+			craftingStationName: buildingType?.name,
+			craftingStationTier: raw.building_requirement?.tier,
+			ingredients,
+			cargoIngredients: cargoIngredients.length > 0 ? cargoIngredients : undefined,
+			levelRequirements,
+			toolRequirements
+		};
+
+		// Add to map grouped by output cargo ID
+		const existing = recipesByCargo.get(cargoOutput.item_id) || [];
+		existing.push(recipe);
+		recipesByCargo.set(cargoOutput.item_id, existing);
+	}
+
+	return recipesByCargo;
+}
+
+/**
  * Parse skills from raw JSON
  */
 function parseSkills(rawSkills: RawSkill[]): Map<number, SkillInfo> {
@@ -705,6 +886,49 @@ function buildCargoToSkillMap(
 }
 
 /**
+ * Build mapping from cargo ID to crafting skill name
+ * For cargo items that are produced by crafting recipes (e.g., Timber, Brick Slab)
+ */
+function buildCargoCraftingSkillMap(
+	rawRecipes: RawRecipe[],
+	skills: Map<number, SkillInfo>
+): Map<number, string> {
+	const cargoToSkill = new Map<number, string>();
+
+	for (const raw of rawRecipes) {
+		if (!raw.crafted_item_stacks || raw.crafted_item_stacks.length === 0) continue;
+
+		// Skip recipes from excluded buildings (e.g., Scrap Bench)
+		if (raw.building_requirement && EXCLUDED_BUILDING_TYPES.has(raw.building_requirement.building_type)) {
+			continue;
+		}
+
+		// Skip recipes that require blocked knowledges (e.g., "The Art of Cheating")
+		if (raw.required_knowledges?.some(k => BLOCKED_KNOWLEDGE_IDS.has(k))) {
+			continue;
+		}
+
+		// Find cargo outputs
+		const cargoOutput = raw.crafted_item_stacks.find(s => s.item_type === 'Cargo');
+		if (!cargoOutput) continue;
+
+		// Get skill from level requirements
+		const skillId = raw.level_requirements?.[0]?.skill_id;
+		if (!skillId) continue;
+
+		const skill = skills.get(skillId);
+		if (!skill) continue;
+
+		// Only set if not already mapped (prefer first/cheapest recipe)
+		if (!cargoToSkill.has(cargoOutput.item_id)) {
+			cargoToSkill.set(cargoOutput.item_id, skill.name);
+		}
+	}
+
+	return cargoToSkill;
+}
+
+/**
  * Build a mapping from output item ID to cargo source skill name
  * For items produced by recipes that consume Cargo (e.g., Fish Oil from Fish Cargo)
  */
@@ -844,4 +1068,119 @@ function buildItemFromListToSkillMap(
 	}
 
 	return itemFromListToSkill;
+}
+
+/**
+ * Parse construction recipes from raw JSON
+ */
+function parseConstructionRecipes(
+	rawRecipes: RawConstructionRecipe[],
+	skills: Map<number, SkillInfo>,
+	toolTypes: Map<number, ToolTypeInfo>
+): Map<number, ConstructionRecipe> {
+	const recipes = new Map<number, ConstructionRecipe>();
+
+	for (const raw of rawRecipes) {
+		// Skip recipes that require blocked knowledges (e.g., "The Art of Cheating")
+		if (raw.required_knowledges?.some(k => BLOCKED_KNOWLEDGE_IDS.has(k))) {
+			continue;
+		}
+
+		// Parse item ingredients
+		const consumedItemStacks: RecipeIngredient[] = (raw.consumed_item_stacks || [])
+			.filter(s => s.item_type === 'Item')
+			.map(s => ({
+				itemId: s.item_id,
+				quantity: s.quantity
+			}));
+
+		// Parse cargo ingredients (note: field is item_id but refers to cargo)
+		const consumedCargoStacks: CargoIngredient[] = (raw.consumed_cargo_stacks || [])
+			.map(s => ({
+				cargoId: s.item_id,
+				quantity: s.quantity
+			}));
+
+		// Parse level requirements with skill names
+		const levelRequirements: LevelRequirement[] = (raw.level_requirements || []).map(lr => {
+			const skill = skills.get(lr.skill_id);
+			return {
+				level: lr.level,
+				skillId: lr.skill_id,
+				skillName: skill?.name || 'Unknown',
+				skillIcon: '',
+				skillTitle: skill?.title || ''
+			};
+		});
+
+		// Parse tool requirements with tool names
+		const toolRequirements: ToolRequirement[] = (raw.tool_requirements || []).map(tr => {
+			const toolType = toolTypes.get(tr.tool_type);
+			return {
+				level: tr.level,
+				power: tr.power,
+				toolType: tr.tool_type,
+				name: toolType?.name || 'Unknown',
+				skillId: toolType?.skillId || 0
+			};
+		});
+
+		const recipe: ConstructionRecipe = {
+			id: raw.id,
+			name: raw.name,
+			buildingDescriptionId: raw.building_description_id,
+			consumedBuilding: raw.consumed_building || 0,
+			consumedItemStacks,
+			consumedCargoStacks,
+			levelRequirements,
+			toolRequirements
+		};
+
+		recipes.set(recipe.id, recipe);
+	}
+
+	return recipes;
+}
+
+/**
+ * Parse building descriptions from raw JSON
+ */
+function parseBuildingDescriptions(
+	rawBuildings: RawBuildingDescription[]
+): Map<number, BuildingDescription> {
+	const buildings = new Map<number, BuildingDescription>();
+
+	for (const raw of rawBuildings) {
+		// Parse functions array
+		const functions: BuildingFunction[] = (raw.functions || []).map(f => ({
+			cargoSlots: f.cargo_slots || 0,
+			storageSlots: f.storage_slots || 0,
+			craftingSlots: f.crafting_slots || 0,
+			refiningSlots: f.refining_slots || 0,
+			housingSlots: f.housing_slots || 0,
+			itemSlotSize: f.item_slot_size || 0,
+			cargoSlotSize: f.cargo_slot_size || 0,
+			level: f.level || 1,
+			tradeOrders: f.trade_orders || 0,
+			concurrentCraftsPerPlayer: f.concurrent_crafts_per_player || 0,
+			terraform: f.terraform || false,
+			housingIncome: f.housing_income || 0,
+			buffIds: f.buff_ids || [],
+			allowedItemIdPerSlot: f.allowed_item_id_per_slot || [],
+			functionType: f.function_type,
+			power: 0
+		}));
+
+		const building: BuildingDescription = {
+			id: raw.id,
+			name: raw.name,
+			description: raw.description || '',
+			iconAssetName: raw.icon_asset_name || '',
+			functions
+		};
+
+		buildings.set(building.id, building);
+	}
+
+	return buildings;
 }

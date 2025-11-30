@@ -3,13 +3,13 @@
  */
 
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { Item, ItemWithRecipes, Building, Recipe, Cargo } from '$lib/types/game';
+import type { Item, ItemWithRecipes, Building, Recipe, Cargo, ConstructionRecipe, BuildingDescription } from '$lib/types/game';
 import type { InventorySource, SourcedItem, SourcedCargo } from '$lib/types/inventory';
 import type { CraftingList, CacheMetadata, ListProgress } from '$lib/types/app';
 
 // Database schema version
 const DB_NAME = 'bitsaver';
-const DB_VERSION = 6; // Incremented for inventoryCargos store
+const DB_VERSION = 8; // Incremented for cargo recipes
 
 // Cache TTL constants (in milliseconds)
 export const CACHE_TTL = {
@@ -54,6 +54,10 @@ interface BithelperDB extends DBSchema {
 	recipes: {
 		key: number; // outputItemId
 		value: StoredRecipeGroup;
+	};
+	cargoRecipes: {
+		key: number; // outputCargoId
+		value: StoredRecipeGroup; // reuses same structure, outputItemId = outputCargoId
 	};
 	extractionRecipes: {
 		key: number; // outputItemId
@@ -116,6 +120,20 @@ interface BithelperDB extends DBSchema {
 			'by-updated': number;
 		};
 	};
+	constructionRecipes: {
+		key: number; // recipe ID
+		value: ConstructionRecipe;
+		indexes: {
+			'by-building': number; // buildingDescriptionId
+		};
+	};
+	buildingDescriptions: {
+		key: number; // building ID
+		value: BuildingDescription;
+		indexes: {
+			'by-name': string;
+		};
+	};
 }
 
 // Database instance (lazy initialized)
@@ -147,6 +165,11 @@ export async function getDB(): Promise<IDBPDatabase<BithelperDB>> {
 			// Recipes store (new in v2)
 			if (!db.objectStoreNames.contains('recipes')) {
 				db.createObjectStore('recipes', { keyPath: 'outputItemId' });
+			}
+
+			// Cargo recipes store (new in v8)
+			if (!db.objectStoreNames.contains('cargoRecipes')) {
+				db.createObjectStore('cargoRecipes', { keyPath: 'outputItemId' });
 			}
 
 			// Extraction recipes store (new in v3)
@@ -210,6 +233,18 @@ export async function getDB(): Promise<IDBPDatabase<BithelperDB>> {
 			if (!db.objectStoreNames.contains('listProgress')) {
 				const progressStore = db.createObjectStore('listProgress', { keyPath: 'listId' });
 				progressStore.createIndex('by-updated', 'updatedAt');
+			}
+
+			// Construction recipes store (new in v7)
+			if (!db.objectStoreNames.contains('constructionRecipes')) {
+				const constructionStore = db.createObjectStore('constructionRecipes', { keyPath: 'id' });
+				constructionStore.createIndex('by-building', 'buildingDescriptionId');
+			}
+
+			// Building descriptions store (new in v7)
+			if (!db.objectStoreNames.contains('buildingDescriptions')) {
+				const buildingDescStore = db.createObjectStore('buildingDescriptions', { keyPath: 'id' });
+				buildingDescStore.createIndex('by-name', 'name');
 			}
 		}
 	});
@@ -574,16 +609,19 @@ export async function clearAllCache(): Promise<void> {
 }
 
 /**
- * Clear only game data cache (items, cargos, buildings, recipes)
+ * Clear only game data cache (items, cargos, buildings, recipes, construction)
  */
 export async function clearGameDataCache(): Promise<void> {
 	const db = await getDB();
 	await db.clear('items');
 	await db.clear('cargos');
 	await db.clear('recipes');
+	await db.clear('cargoRecipes');
 	await db.clear('extractionRecipes');
 	await db.clear('itemDetails');
 	await db.clear('buildings');
+	await db.clear('constructionRecipes');
+	await db.clear('buildingDescriptions');
 	await db.clear('gameDataMeta');
 	await db.delete('metadata', 'items');
 	await db.delete('metadata', 'buildings');
@@ -651,6 +689,33 @@ export async function cacheRecipes(recipes: Map<number, Recipe[]>): Promise<void
 }
 
 /**
+ * Get all cached cargo recipes (as Map)
+ */
+export async function getCachedCargoRecipes(): Promise<Map<number, Recipe[]>> {
+	const db = await getDB();
+	const all = await db.getAll('cargoRecipes');
+	const map = new Map<number, Recipe[]>();
+	for (const group of all) {
+		map.set(group.outputItemId, group.recipes); // outputItemId = outputCargoId
+	}
+	return map;
+}
+
+/**
+ * Cache all cargo recipes
+ */
+export async function cacheCargoRecipes(recipes: Map<number, Recipe[]>): Promise<void> {
+	const db = await getDB();
+	const tx = db.transaction('cargoRecipes', 'readwrite');
+
+	const puts = Array.from(recipes.entries()).map(([outputCargoId, recipeList]) =>
+		tx.store.put({ outputItemId: outputCargoId, recipes: recipeList })
+	);
+
+	await Promise.all([...puts, tx.done]);
+}
+
+/**
  * Get all cached extraction recipes (as Map)
  */
 export async function getCachedExtractionRecipes(): Promise<Map<number, Recipe[]>> {
@@ -680,16 +745,19 @@ export async function cacheExtractionRecipes(recipes: Map<number, Recipe[]>): Pr
 // ============ Full Game Data Cache ============
 
 /**
- * Cache all game data (items, cargos, recipes, extraction recipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill) with hash
+ * Cache all game data (items, cargos, recipes, extraction recipes, construction, etc.) with hash
  */
 export async function cacheAllGameData(
 	items: Map<number, Item>,
 	cargos: Map<number, Cargo>,
 	recipes: Map<number, Recipe[]>,
+	cargoRecipes: Map<number, Recipe[]>,
 	extractionRecipes: Map<number, Recipe[]>,
 	cargoToSkill: Map<number, string>,
 	itemToCargoSkill: Map<number, string>,
 	itemFromListToSkill: Map<number, string>,
+	constructionRecipes: Map<number, ConstructionRecipe>,
+	buildingDescriptions: Map<number, BuildingDescription>,
 	hash: string
 ): Promise<void> {
 	const db = await getDB();
@@ -698,7 +766,10 @@ export async function cacheAllGameData(
 	await db.clear('items');
 	await db.clear('cargos');
 	await db.clear('recipes');
+	await db.clear('cargoRecipes');
 	await db.clear('extractionRecipes');
+	await db.clear('constructionRecipes');
+	await db.clear('buildingDescriptions');
 
 	// Cache items
 	const itemTx = db.transaction('items', 'readwrite');
@@ -713,8 +784,21 @@ export async function cacheAllGameData(
 	// Cache recipes
 	await cacheRecipes(recipes);
 
+	// Cache cargo recipes
+	await cacheCargoRecipes(cargoRecipes);
+
 	// Cache extraction recipes
 	await cacheExtractionRecipes(extractionRecipes);
+
+	// Cache construction recipes
+	const constructionTx = db.transaction('constructionRecipes', 'readwrite');
+	const constructionPuts = Array.from(constructionRecipes.values()).map((recipe) => constructionTx.store.put(recipe));
+	await Promise.all([...constructionPuts, constructionTx.done]);
+
+	// Cache building descriptions
+	const buildingDescTx = db.transaction('buildingDescriptions', 'readwrite');
+	const buildingDescPuts = Array.from(buildingDescriptions.values()).map((building) => buildingDescTx.store.put(building));
+	await Promise.all([...buildingDescPuts, buildingDescTx.done]);
 
 	// Cache cargoToSkill as JSON in metadata
 	await cacheCargoToSkill(cargoToSkill);
@@ -823,10 +907,13 @@ export async function loadAllGameDataFromCache(): Promise<{
 	items: Map<number, Item>;
 	cargos: Map<number, Cargo>;
 	recipes: Map<number, Recipe[]>;
+	cargoRecipes: Map<number, Recipe[]>;
 	extractionRecipes: Map<number, Recipe[]>;
 	cargoToSkill: Map<number, string>;
 	itemToCargoSkill: Map<number, string>;
 	itemFromListToSkill: Map<number, string>;
+	constructionRecipes: Map<number, ConstructionRecipe>;
+	buildingDescriptions: Map<number, BuildingDescription>;
 } | null> {
 	const db = await getDB();
 
@@ -850,11 +937,26 @@ export async function loadAllGameDataFromCache(): Promise<{
 		cargos.set(cargo.id, cargo);
 	}
 
+	// Load construction recipes
+	const constructionRecipes = new Map<number, ConstructionRecipe>();
+	const allConstructionRecipes = await db.getAll('constructionRecipes');
+	for (const recipe of allConstructionRecipes) {
+		constructionRecipes.set(recipe.id, recipe);
+	}
+
+	// Load building descriptions
+	const buildingDescriptions = new Map<number, BuildingDescription>();
+	const allBuildingDescriptions = await db.getAll('buildingDescriptions');
+	for (const building of allBuildingDescriptions) {
+		buildingDescriptions.set(building.id, building);
+	}
+
 	const recipes = await getCachedRecipes();
+	const cargoRecipes = await getCachedCargoRecipes();
 	const extractionRecipes = await getCachedExtractionRecipes();
 	const cargoToSkill = await loadCargoToSkill();
 	const itemToCargoSkill = await loadItemToCargoSkill();
 	const itemFromListToSkill = await loadItemFromListToSkill();
 
-	return { items, cargos, recipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill };
+	return { items, cargos, recipes, cargoRecipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, constructionRecipes, buildingDescriptions };
 }
