@@ -256,7 +256,7 @@
 				</label>
 				<select
 					id="auto-refresh"
-					value={settings.autoRefreshMinutes}
+					value={String(settings.autoRefreshMinutes)}
 					onchange={(e) => setAutoRefresh(parseInt(e.currentTarget.value))}
 					class="mt-1 w-full rounded-lg border border-gray-600 bg-gray-800 px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
 				>
@@ -267,7 +267,22 @@
 					<option value="30">30 minutes</option>
 				</select>
 				<p class="mt-1 text-xs text-gray-400">
-					Automatically sync inventory when entering a list if data is older than this.
+					Automatically sync inventory when data is older than this. Checks periodically while viewing a list.
+				</p>
+			</div>
+
+			<div>
+				<label class="flex cursor-pointer items-center gap-3">
+					<input
+						type="checkbox"
+						checked={settings.stripedRows}
+						onchange={() => (settings.stripedRows = !settings.stripedRows)}
+						class="h-4 w-4 rounded border-gray-500 bg-gray-800 text-blue-600 focus:ring-blue-500"
+					/>
+					<span class="text-sm font-medium text-gray-300">Striped table rows</span>
+				</label>
+				<p class="ml-7 mt-1 text-xs text-gray-400">
+					Alternate row colors for easier reading in tables and lists.
 				</p>
 			</div>
 		</div>

@@ -1,10 +1,13 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import {
 		crafting,
 		removeItemFromList,
+		removeEntryFromList,
 		updateItemQuantity,
+		updateEntryQuantity,
 		updateListSources,
 		updateListAutoRefresh,
 		calculateListRequirements,
@@ -22,6 +25,7 @@
 	import {
 		gameData,
 		getItemById,
+		getCargoById,
 		searchItems,
 		findRecipesForItem
 	} from '$lib/state/game-data.svelte';
@@ -31,7 +35,40 @@
 	import RecipePopover from '$lib/components/RecipePopover.svelte';
 	import HaveBreakdownTooltip from '$lib/components/HaveBreakdownTooltip.svelte';
 	import DevRequirementBreakdown from '$lib/components/DevRequirementBreakdown.svelte';
-	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode } from '$lib/types/app';
+	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode, CraftingListEntry } from '$lib/types/app';
+	import { isItemEntry, isCargoEntry } from '$lib/types/app';
+
+	// Helper: Get unique material key for tracking
+	function getMaterialKey(mat: MaterialRequirement): string {
+		if (mat.nodeType === 'cargo') {
+			return `cargo-${mat.cargoId}`;
+		}
+		return `item-${mat.itemId}`;
+	}
+
+	// Helper: Get display name for a material
+	function getMaterialName(mat: MaterialRequirement): string {
+		if (mat.nodeType === 'cargo') {
+			return mat.cargo?.name ?? `Cargo #${mat.cargoId}`;
+		}
+		return mat.item?.name ?? `Item #${mat.itemId}`;
+	}
+
+	// Helper: Get icon URL for a material
+	function getMaterialIconUrl(mat: MaterialRequirement): string | null {
+		if (mat.nodeType === 'cargo' && mat.cargo?.iconAssetName) {
+			return getItemIconUrl(mat.cargo.iconAssetName);
+		}
+		if (mat.item?.iconAssetName) {
+			return getItemIconUrl(mat.item.iconAssetName);
+		}
+		return null;
+	}
+
+	// Helper: Check if material is an item (for item-specific features like recipes)
+	function isItemMaterial(mat: MaterialRequirement): boolean {
+		return mat.nodeType === 'item';
+	}
 
 	// Get list from URL param
 	const listId = $derived($page.params.id);
@@ -54,8 +91,15 @@
 	let collapsedSections = $state<Set<string>>(new Set());
 
 	// Manual tracking: user-entered "have" quantities and checked-off items
-	let manualHave = $state<Map<number, number>>(new Map()); // itemId -> manual quantity
-	let checkedOff = $state<Set<number>>(new Set()); // itemId -> manually marked complete
+	// Uses string keys to support both items ("item-123") and cargo ("cargo-456")
+	let manualHave = $state<Map<string, number>>(new Map()); // materialKey -> manual quantity
+	let checkedOff = $state<Set<string>>(new Set()); // materialKey -> manually marked complete
+	// Legacy number-keyed maps for backwards compatibility with saved progress
+	let legacyManualHave = $state<Map<number, number>>(new Map()); // itemId -> manual quantity (legacy)
+	let legacyCheckedOff = $state<Set<number>>(new Set()); // itemId -> manually complete (legacy)
+
+	// Recipe preferences: user-selected recipes for items with multiple options
+	let recipePreferences = $state<Map<string, number>>(new Map()); // materialKey -> recipeId
 
 	// Progress persistence
 	let progressLoaded = $state(false);
@@ -65,10 +109,39 @@
 		if (!listId || !progressLoaded) return;
 		if (saveTimeout) clearTimeout(saveTimeout);
 		saveTimeout = setTimeout(async () => {
+			// Convert string-keyed maps to separate item and cargo arrays for storage
+			const itemManualHave: [number, number][] = [];
+			const cargoManualHave: [number, number][] = [];
+			for (const [key, qty] of manualHave) {
+				if (key.startsWith('item-')) {
+					const itemId = parseInt(key.substring(5), 10);
+					if (!isNaN(itemId)) itemManualHave.push([itemId, qty]);
+				} else if (key.startsWith('cargo-')) {
+					const cargoId = parseInt(key.substring(6), 10);
+					if (!isNaN(cargoId)) cargoManualHave.push([cargoId, qty]);
+				}
+			}
+			const itemCheckedOff: number[] = [];
+			const cargoCheckedOff: number[] = [];
+			for (const key of checkedOff) {
+				if (key.startsWith('item-')) {
+					const itemId = parseInt(key.substring(5), 10);
+					if (!isNaN(itemId)) itemCheckedOff.push(itemId);
+				} else if (key.startsWith('cargo-')) {
+					const cargoId = parseInt(key.substring(6), 10);
+					if (!isNaN(cargoId)) cargoCheckedOff.push(cargoId);
+				}
+			}
+			// Serialize recipe preferences
+			const recipePrefsArray = Array.from(recipePreferences.entries());
+
 			await saveListProgress({
 				listId,
-				manualHave: Array.from(manualHave.entries()),
-				checkedOff: Array.from(checkedOff),
+				manualHave: itemManualHave,
+				manualHaveCargo: cargoManualHave,
+				checkedOff: itemCheckedOff,
+				checkedOffCargo: cargoCheckedOff,
+				recipePreferences: recipePrefsArray,
 				hideCompleted,
 				viewMode,
 				collapsedSections: Array.from(collapsedSections),
@@ -77,18 +150,24 @@
 		}, 500);
 	}
 
+	// Get manual have by material key
+	function getManualHaveByKey(key: string): number | undefined {
+		return manualHave.get(key);
+	}
+
+	// Legacy function for item ID (used in some places)
 	function getManualHave(itemId: number): number | undefined {
-		return manualHave.get(itemId);
+		return manualHave.get(`item-${itemId}`);
 	}
 
 	let recalcTimeout: ReturnType<typeof setTimeout> | null = null;
 
-	function setManualHave(itemId: number, qty: number) {
+	function setManualHaveByKey(key: string, qty: number) {
 		const newMap = new Map(manualHave);
 		if (qty <= 0) {
-			newMap.delete(itemId);
+			newMap.delete(key);
 		} else {
-			newMap.set(itemId, qty);
+			newMap.set(key, qty);
 		}
 		manualHave = newMap;
 
@@ -102,70 +181,107 @@
 		}, 300);
 	}
 
-	function isCheckedOff(itemId: number): boolean {
-		return checkedOff.has(itemId);
+	// Legacy function for item ID
+	function setManualHave(itemId: number, qty: number) {
+		setManualHaveByKey(`item-${itemId}`, qty);
 	}
 
-	function toggleCheckedOff(itemId: number) {
+	function isCheckedOffByKey(key: string): boolean {
+		return checkedOff.has(key);
+	}
+
+	// Legacy function for item ID
+	function isCheckedOff(itemId: number): boolean {
+		return checkedOff.has(`item-${itemId}`);
+	}
+
+	async function toggleCheckedOffByKey(key: string) {
+		// Save scroll position before state change
+		const scrollY = window.scrollY;
+
 		const newSet = new Set(checkedOff);
-		if (newSet.has(itemId)) {
-			newSet.delete(itemId);
+		if (newSet.has(key)) {
+			newSet.delete(key);
 		} else {
-			newSet.add(itemId);
+			newSet.add(key);
 		}
 		checkedOff = newSet;
 		// Save progress
 		scheduleProgressSave();
 		// Recalculate to propagate check-off through the tree
-		calculateRequirements();
+		await calculateRequirements();
+
+		// Restore scroll position after DOM updates
+		await tick();
+		window.scrollTo(0, scrollY);
+	}
+
+	// Legacy function for item ID
+	function toggleCheckedOff(itemId: number) {
+		toggleCheckedOffByKey(`item-${itemId}`);
 	}
 
 	// Get effective "have" amount (manual override or from inventory)
 	function getEffectiveHave(mat: MaterialRequirement): number {
-		const manual = manualHave.get(mat.itemId);
+		const key = getMaterialKey(mat);
+		const manual = manualHave.get(key);
 		return manual !== undefined ? manual : mat.have;
 	}
 
 	// Check if material is effectively complete (remaining after propagation is 0)
 	function isEffectivelyComplete(mat: MaterialRequirement): boolean {
-		if (checkedOff.has(mat.itemId)) return true;
+		const key = getMaterialKey(mat);
+		if (checkedOff.has(key)) return true;
 		return mat.remaining === 0;
 	}
 
 	// Filter step groups to exclude final items and apply hide completed
-	// Helper to filter materials
-	function filterMaterials(materials: MaterialRequirement[], listItemIds: Set<number>): MaterialRequirement[] {
-		let filtered = materials.filter((mat) => !listItemIds.has(mat.itemId));
+	// Helper to filter materials - excludes list entry root items/cargo
+	function filterMaterials(materials: MaterialRequirement[], listEntryKeys: Set<string>): MaterialRequirement[] {
+		let filtered = materials.filter((mat) => !listEntryKeys.has(getMaterialKey(mat)));
 		if (hideCompleted) {
 			filtered = filtered.filter((m) => !isEffectivelyComplete(m));
 		}
 		return filtered;
 	}
 
+	// Helper to get keys for all list entries (both items and cargo)
+	function getListEntryKeys(entries: CraftingListEntry[]): Set<string> {
+		const keys = new Set<string>();
+		for (const entry of entries) {
+			if (isItemEntry(entry)) {
+				keys.add(`item-${entry.itemId}`);
+			} else if (isCargoEntry(entry)) {
+				keys.add(`cargo-${entry.cargoId}`);
+			}
+		}
+		return keys;
+	}
+
 	const filteredStepGroups = $derived.by(() => {
-		const listItemIds = new Set(list?.items.map((i) => i.itemId) || []);
+		const listEntryKeys = getListEntryKeys(list?.entries || []);
 
 		return stepGroups
 			.map((group) => ({
 				...group,
-				materials: filterMaterials(group.materials, listItemIds)
+				materials: filterMaterials(group.materials, listEntryKeys)
 			}))
 			.filter((group) => group.materials.length > 0);
 	});
 
 	const filteredProfessionGroups = $derived.by(() => {
-		const listItemIds = new Set(list?.items.map((i) => i.itemId) || []);
+		const listEntryKeys = getListEntryKeys(list?.entries || []);
 
 		return professionGroups
 			.map((group) => ({
 				...group,
-				materials: filterMaterials(group.materials, listItemIds)
+				materials: filterMaterials(group.materials, listEntryKeys)
 			}))
 			.filter((group) => group.materials.length > 0);
 	});
 
 	const filteredCombinedGroups = $derived.by(() => {
-		const listItemIds = new Set(list?.items.map((i) => i.itemId) || []);
+		const listEntryKeys = getListEntryKeys(list?.entries || []);
 
 		return combinedGroups
 			.map((stepGroup) => ({
@@ -173,11 +289,21 @@
 				professionGroups: stepGroup.professionGroups
 					.map((profGroup) => ({
 						...profGroup,
-						materials: filterMaterials(profGroup.materials, listItemIds)
+						materials: filterMaterials(profGroup.materials, listEntryKeys)
 					}))
 					.filter((profGroup) => profGroup.materials.length > 0)
 			}))
 			.filter((stepGroup) => stepGroup.professionGroups.length > 0);
+	});
+
+	// Count of completed entries in the Final Crafts list
+	const completedEntriesCount = $derived.by(() => {
+		if (!list?.entries) return 0;
+		return list.entries.filter((entry) => {
+			const key = isItemEntry(entry) ? `item-${entry.itemId}` : `cargo-${entry.cargoId}`;
+			const have = manualHave.get(key) ?? 0;
+			return checkedOff.has(key) || have >= entry.quantity;
+		}).length;
 	});
 
 	function toggleSection(section: string) {
@@ -210,13 +336,28 @@
 	let searchQuery = $state('');
 	let searchResults = $state<ReturnType<typeof searchItems>>([]);
 	let showAddModal = $state(false);
+	let searchInputEl = $state<HTMLInputElement | null>(null);
 	let itemQuantities = $state<Map<number, number>>(new Map());
 	let itemRecipes = $state<Map<number, number | undefined>>(new Map()); // itemId -> selected recipeId
 	let recentlyAdded = $state<Map<number, boolean>>(new Map()); // itemId -> show checkmark
 
+	// Focus search input when add modal opens
+	$effect(() => {
+		if (showAddModal && searchInputEl) {
+			// Small delay to ensure DOM is ready
+			setTimeout(() => searchInputEl?.focus(), 0);
+		}
+	});
+
 	// Inventory source selection modal
 	let showSourceModal = $state(false);
 	let selectedSourceIds = $state<string[]>([]);
+
+	// Recipe selection modal
+	let showRecipeModal = $state(false);
+	let recipeModalItemId = $state<number | null>(null);
+	let recipeModalMaterialKey = $state<string | null>(null);
+	let selectedModalRecipeId = $state<number | undefined>(undefined);
 
 	// Auto-sync on mount (wait for game data to be loaded)
 	$effect(() => {
@@ -232,13 +373,57 @@
 		}
 	});
 
+	// Periodic auto-refresh while viewing the list
+	$effect(() => {
+		// Only set up interval if list is loaded and auto-refresh is enabled
+		if (!list || list.autoRefreshEnabled === false) return;
+		if (settings.autoRefreshMinutes === 0) return;
+
+		// Check every minute if inventory is stale
+		const intervalMs = 60 * 1000; // Check every minute
+		const intervalId = setInterval(() => {
+			handleAutoSync();
+		}, intervalMs);
+
+		// Cleanup on unmount or when dependencies change
+		return () => clearInterval(intervalId);
+	});
+
 	async function loadProgress() {
 		if (!listId) return;
 
 		const progress = await getListProgress(listId);
 		if (progress) {
-			manualHave = new Map(progress.manualHave);
-			checkedOff = new Set(progress.checkedOff);
+			// Convert legacy number-keyed data to string-keyed format
+			const newManualHave = new Map<string, number>();
+			for (const [itemId, qty] of progress.manualHave) {
+				newManualHave.set(`item-${itemId}`, qty);
+			}
+			// Also load cargo manual have if present
+			if (progress.manualHaveCargo) {
+				for (const [cargoId, qty] of progress.manualHaveCargo) {
+					newManualHave.set(`cargo-${cargoId}`, qty);
+				}
+			}
+			manualHave = newManualHave;
+
+			const newCheckedOff = new Set<string>();
+			for (const itemId of progress.checkedOff) {
+				newCheckedOff.add(`item-${itemId}`);
+			}
+			// Also load cargo checked off if present
+			if (progress.checkedOffCargo) {
+				for (const cargoId of progress.checkedOffCargo) {
+					newCheckedOff.add(`cargo-${cargoId}`);
+				}
+			}
+			checkedOff = newCheckedOff;
+
+			// Load recipe preferences
+			if (progress.recipePreferences) {
+				recipePreferences = new Map(progress.recipePreferences);
+			}
+
 			hideCompleted = progress.hideCompleted;
 			viewMode = progress.viewMode;
 			collapsedSections = new Set(progress.collapsedSections);
@@ -249,9 +434,9 @@
 		calculateRequirements();
 	}
 
-	// Recalculate when list items change
+	// Recalculate when list entries change
 	$effect(() => {
-		if (list?.items && gameData.isInitialized) {
+		if (list?.entries && gameData.isInitialized) {
 			calculateRequirements();
 		}
 	});
@@ -266,6 +451,8 @@
 			if (didSync) {
 				lastSyncMessage = 'Inventory synced automatically';
 				setTimeout(() => (lastSyncMessage = null), 3000);
+				// Recalculate requirements with new inventory data
+				await calculateRequirements();
 			}
 		} catch (e) {
 			console.error('Auto-sync failed:', e);
@@ -300,7 +487,23 @@
 
 		isCalculating = true;
 		try {
-			requirements = await calculateListRequirements(list.id, manualHave, checkedOff);
+			// Convert string-keyed maps to number-keyed for the API (items only, cargo doesn't have inventory)
+			const itemManualHave = new Map<number, number>();
+			for (const [key, qty] of manualHave) {
+				if (key.startsWith('item-')) {
+					const itemId = parseInt(key.substring(5), 10);
+					if (!isNaN(itemId)) itemManualHave.set(itemId, qty);
+				}
+			}
+			const itemCheckedOff = new Set<number>();
+			for (const key of checkedOff) {
+				if (key.startsWith('item-')) {
+					const itemId = parseInt(key.substring(5), 10);
+					if (!isNaN(itemId)) itemCheckedOff.add(itemId);
+				}
+			}
+
+			requirements = await calculateListRequirements(list.id, itemManualHave, itemCheckedOff, recipePreferences);
 			stepGroups = groupRequirementsByStep(requirements);
 			professionGroups = groupRequirementsByProfession(requirements);
 			combinedGroups = groupRequirementsByStepWithProfessions(requirements);
@@ -417,9 +620,19 @@
 		await removeItemFromList(list.id, itemId);
 	}
 
+	async function handleRemoveEntry(entryId: string) {
+		if (!list) return;
+		await removeEntryFromList(list.id, entryId);
+	}
+
 	async function handleQuantityChange(itemId: number, quantity: number) {
 		if (!list) return;
 		await updateItemQuantity(list.id, itemId, quantity);
+	}
+
+	async function handleEntryQuantityChange(entryId: string, quantity: number) {
+		if (!list) return;
+		await updateEntryQuantity(list.id, entryId, quantity);
 	}
 
 	function openSourceModal() {
@@ -470,6 +683,55 @@
 				selectedSourceIds = selectedSourceIds.filter((id) => !claimSourceIds.includes(id));
 			}
 		}
+	}
+
+	function openRecipeModal(mat: MaterialRequirement) {
+		if (mat.nodeType !== 'item' || !mat.itemId) return;
+
+		const recipes = findRecipesForItem(mat.itemId);
+		// Filter to valid recipes (same logic as RecipePopover)
+		const validRecipes = recipes.filter(r => {
+			const hasItemIngredients = r.ingredients.length > 0;
+			const hasCargoIngredients = (r.cargoIngredients?.length ?? 0) > 0;
+			if (!hasItemIngredients && !hasCargoIngredients) return false;
+			if (hasItemIngredients && !r.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+			// Check if it's a downgrade recipe
+			if (!mat.itemId) return false;
+			const outputItem = getItemById(mat.itemId);
+			if (!outputItem || outputItem.tier === -1) return true;
+			return !r.ingredients.some(ing => {
+				const ingItem = getItemById(ing.itemId);
+				if (!ingItem || ingItem.tier === -1) return false;
+				return ingItem.tier > outputItem.tier;
+			});
+		});
+
+		if (validRecipes.length <= 1) return;
+
+		recipeModalItemId = mat.itemId;
+		recipeModalMaterialKey = getMaterialKey(mat);
+		selectedModalRecipeId = recipePreferences.get(recipeModalMaterialKey) ?? getDefaultRecipeId(mat.itemId);
+		showRecipeModal = true;
+	}
+
+	function applyRecipeSelection() {
+		if (!recipeModalMaterialKey || selectedModalRecipeId === undefined) return;
+
+		const newMap = new Map(recipePreferences);
+		newMap.set(recipeModalMaterialKey, selectedModalRecipeId);
+		recipePreferences = newMap;
+
+		scheduleProgressSave();
+		calculateRequirements(); // Recalculate with new recipe
+
+		closeRecipeModal();
+	}
+
+	function closeRecipeModal() {
+		showRecipeModal = false;
+		recipeModalItemId = null;
+		recipeModalMaterialKey = null;
+		selectedModalRecipeId = undefined;
 	}
 
 	function formatLastSync(): string {
@@ -660,7 +922,7 @@
 
 		<!-- Sections Container -->
 		<div class="space-y-2">
-			{#if list.items.length > 0}
+			{#if list.entries.length > 0}
 				{#if isCalculating}
 					<div class="flex items-center gap-2 rounded-lg bg-gray-800 px-4 py-3 text-gray-400">
 						<span
@@ -720,8 +982,8 @@
 
 								{#if !isSectionCollapsed(sectionId)}
 									<div class="divide-y divide-gray-700">
-										{#each group.materials as mat, i (mat.itemId)}
-											{@const matIconUrl = mat.item ? getItemIconUrl(mat.item.iconAssetName) : null}
+										{#each group.materials as mat, i (getMaterialKey(mat))}
+											{@const matIconUrl = getMaterialIconUrl(mat)}
 											{@const effectiveHave = getEffectiveHave(mat)}
 											{@const isComplete = isEffectivelyComplete(mat)}
 											{@const prevTier = i > 0 ? group.materials[i - 1].tier : null}
@@ -731,7 +993,7 @@
 													Tier {mat.tier}
 												</div>
 											{/if}
-											{@render materialRow(mat, matIconUrl, effectiveHave, isComplete)}
+											{@render materialRow(mat, matIconUrl, effectiveHave, isComplete, i)}
 										{/each}
 									</div>
 								{/if}
@@ -783,8 +1045,8 @@
 
 								{#if !isSectionCollapsed(sectionId)}
 									<div class="divide-y divide-gray-700">
-										{#each group.materials as mat, i (mat.itemId)}
-											{@const matIconUrl = mat.item ? getItemIconUrl(mat.item.iconAssetName) : null}
+										{#each group.materials as mat, i (getMaterialKey(mat))}
+											{@const matIconUrl = getMaterialIconUrl(mat)}
 											{@const effectiveHave = getEffectiveHave(mat)}
 											{@const isComplete = isEffectivelyComplete(mat)}
 											{@const prevTier = i > 0 ? group.materials[i - 1].tier : null}
@@ -794,7 +1056,7 @@
 													Tier {mat.tier}
 												</div>
 											{/if}
-											{@render materialRow(mat, matIconUrl, effectiveHave, isComplete)}
+											{@render materialRow(mat, matIconUrl, effectiveHave, isComplete, i)}
 										{/each}
 									</div>
 								{/if}
@@ -876,8 +1138,8 @@
 											</button>
 
 											{#if !isSectionCollapsed(profSectionId)}
-												{#each profGroup.materials as mat, i (mat.itemId)}
-													{@const matIconUrl = mat.item ? getItemIconUrl(mat.item.iconAssetName) : null}
+												{#each profGroup.materials as mat, i (getMaterialKey(mat))}
+													{@const matIconUrl = getMaterialIconUrl(mat)}
 													{@const effectiveHave = getEffectiveHave(mat)}
 													{@const isComplete = isEffectivelyComplete(mat)}
 													{@const prevTier = i > 0 ? profGroup.materials[i - 1].tier : null}
@@ -887,7 +1149,7 @@
 															Tier {mat.tier}
 														</div>
 													{/if}
-													{@render materialRow(mat, matIconUrl, effectiveHave, isComplete)}
+													{@render materialRow(mat, matIconUrl, effectiveHave, isComplete, i)}
 												{/each}
 											{/if}
 										{/each}
@@ -922,12 +1184,10 @@
 								d="M9 5l7 7-7 7"
 							/>
 						</svg>
-						<span class="font-medium text-purple-200">Final Crafts ({list.items.length})</span>
-						{#if list.items.some((i) => isCheckedOff(i.itemId) || (getManualHave(i.itemId) ?? 0) >= i.quantity)}
+						<span class="font-medium text-purple-200">Final Crafts ({list.entries.length})</span>
+						{#if completedEntriesCount > 0}
 							<span class="text-xs text-green-400"
-								>{list.items.filter(
-									(i) => isCheckedOff(i.itemId) || (getManualHave(i.itemId) ?? 0) >= i.quantity
-								).length}/{list.items.length} done</span
+								>{completedEntriesCount}/{list.entries.length} done</span
 							>
 						{/if}
 					</button>
@@ -942,36 +1202,38 @@
 
 				{#if !isSectionCollapsed('items')}
 					<div class="divide-y divide-gray-700">
-						{#if list.items.length === 0}
+						{#if list.entries.length === 0}
 							<div class="px-4 py-3 text-sm text-gray-400">
 								No items yet. Click + Add to get started.
 							</div>
 						{:else}
-							{#each list.items as listItem (listItem.id)}
-								{@const item = getItemById(listItem.itemId)}
-								{@const iconUrl = item ? getItemIconUrl(item.iconAssetName) : null}
-								{@const haveQty = getManualHave(listItem.itemId) ?? 0}
-								{@const isComplete = isCheckedOff(listItem.itemId) || haveQty >= listItem.quantity}
+							{#each list.entries as entry, i (entry.id)}
+								{@const entryKey = isItemEntry(entry) ? `item-${entry.itemId}` : `cargo-${entry.cargoId}`}
+								{@const entryItem = isItemEntry(entry) ? getItemById(entry.itemId) : null}
+								{@const entryCargo = isCargoEntry(entry) ? getCargoById(entry.cargoId) : null}
+								{@const entryName = entryItem?.name ?? entryCargo?.name ?? `Entry #${entry.id}`}
+								{@const iconAsset = entryItem?.iconAssetName ?? entryCargo?.iconAssetName}
+								{@const iconUrl = iconAsset ? getItemIconUrl(iconAsset) : null}
+								{@const haveQty = manualHave.get(entryKey) ?? 0}
+								{@const isComplete = checkedOff.has(entryKey) || haveQty >= entry.quantity}
+								{@const isStriped = settings.stripedRows && i % 2 === 1}
 								{#if !hideCompleted || !isComplete}
 									<div
-										class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete
-											? 'opacity-50'
-											: ''}"
+										class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete ? 'opacity-50' : ''}"
+										style:background-color={isStriped ? 'rgba(55, 65, 81, 0.8)' : undefined}
 									>
 										<!-- Checkbox -->
 										<button
 											type="button"
-											onclick={() => toggleCheckedOff(listItem.itemId)}
-											class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(
-												listItem.itemId
-											)
+											onclick={() => toggleCheckedOffByKey(entryKey)}
+											class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isComplete
 												? 'border-green-500 bg-green-600'
 												: 'border-gray-500 hover:border-gray-400'}"
-											aria-label={isCheckedOff(listItem.itemId)
+											aria-label={checkedOff.has(entryKey)
 												? 'Unmark as complete'
 												: 'Mark as complete'}
 										>
-											{#if isCheckedOff(listItem.itemId)}
+											{#if isComplete}
 												<svg
 													class="h-3 w-3 text-white"
 													fill="none"
@@ -987,26 +1249,91 @@
 												</svg>
 											{/if}
 										</button>
-										<!-- Icon + Name with Recipe Popover -->
-										<RecipePopover itemId={listItem.itemId}>
-											<div class="flex min-w-0 flex-1 cursor-help items-center gap-3">
+										<!-- Icon + Name (with Recipe Popover for items only) -->
+										{#if isItemEntry(entry)}
+											{@const recipes = findRecipesForItem(entry.itemId)}
+											{@const validRecipes = recipes.filter(r => {
+												const hasItemIngredients = r.ingredients.length > 0;
+												const hasCargoIngredients = (r.cargoIngredients?.length ?? 0) > 0;
+												if (!hasItemIngredients && !hasCargoIngredients) return false;
+												if (hasItemIngredients && !r.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+												const outputItem = getItemById(entry.itemId);
+												if (!outputItem || outputItem.tier === -1) return true;
+												return !r.ingredients.some(ing => {
+													const ingItem = getItemById(ing.itemId);
+													if (!ingItem || ingItem.tier === -1) return false;
+													return ingItem.tier > outputItem.tier;
+												});
+											})}
+											<RecipePopover itemId={entry.itemId}>
+												<div class="flex min-w-0 flex-1 cursor-help items-center gap-3">
+													<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+														{#if iconUrl}
+															<img src={iconUrl} alt="" class="h-7 w-7 object-contain" />
+														{:else}
+															<span class="text-gray-500">?</span>
+														{/if}
+													</div>
+													<div class="min-w-0 flex-1 flex items-center gap-1">
+														<span class="text-sm text-white">{entryName}</span>
+														{#if validRecipes.length > 1}
+															{@const currentRecipeId = recipePreferences.get(entryKey)}
+															{@const sortedRecipes = validRecipes.sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity))}
+															{@const defaultRecipeId = sortedRecipes[0]?.id}
+															{@const isNonDefault = currentRecipeId !== undefined && currentRecipeId !== defaultRecipeId}
+															<button
+																type="button"
+																onclick={() => {
+																	// Create a minimal MaterialRequirement-like object
+																	const mockMat = {
+																		nodeType: 'item' as const,
+																		itemId: entry.itemId,
+																		item: entryItem
+																	};
+																	openRecipeModal(mockMat as any);
+																}}
+																class="relative flex-shrink-0 p-0.5 rounded border text-xs transition-colors
+																	{isNonDefault
+																		? 'bg-blue-900/40 border-blue-500 text-blue-300'
+																		: 'bg-gray-700 border-gray-600 text-gray-400 hover:bg-gray-600'}"
+																title="Select recipe"
+																aria-label="Select recipe for {entryName}"
+															>
+																<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+																	<path d="m15 12-8.5 8.5c-.83.83-2.17.83-3 0 0 0 0 0 0 0a2.12 2.12 0 0 1 0-3L12 9"/>
+																	<path d="M17.64 15 22 10.64"/>
+																	<path d="m20.91 11.7-1.25-1.25c-.6-.6-.93-1.4-.93-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 1 12 8.4v1.56l2 2h2.47l2.26 1.91"/>
+																</svg>
+																{#if isNonDefault}
+																	<span class="absolute -top-0.5 -right-0.5 inline-block w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+																{/if}
+															</button>
+														{/if}
+														<span class="ml-1 text-sm text-purple-400 tabular-nums"
+															>x{formatQty(entry.quantity)}</span
+														>
+													</div>
+												</div>
+											</RecipePopover>
+										{:else}
+											<!-- Cargo entry - no recipe popover -->
+											<div class="flex min-w-0 flex-1 items-center gap-3">
 												<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
 													{#if iconUrl}
 														<img src={iconUrl} alt="" class="h-7 w-7 object-contain" />
 													{:else}
-														<span class="text-gray-500">?</span>
+														<span class="text-gray-500">📦</span>
 													{/if}
 												</div>
 												<div class="min-w-0 flex-1">
-													<span class="text-sm text-white"
-														>{item?.name || `Item #${listItem.itemId}`}</span
-													>
+													<span class="text-sm text-white">{entryName}</span>
+													<span class="ml-1 text-xs text-amber-400">(Cargo)</span>
 													<span class="ml-1 text-sm text-purple-400 tabular-nums"
-														>x{formatQty(listItem.quantity)}</span
+														>x{formatQty(entry.quantity)}</span
 													>
 												</div>
 											</div>
-										</RecipePopover>
+										{/if}
 										<!-- Have / Need + Controls -->
 										<div class="flex items-center gap-2 text-sm">
 											<div
@@ -1016,7 +1343,7 @@
 													type="number"
 													value={haveQty}
 													onchange={(e) =>
-														setManualHave(listItem.itemId, parseInt(e.currentTarget.value) || 0)}
+														setManualHaveByKey(entryKey, parseInt(e.currentTarget.value) || 0)}
 													min="0"
 													class="w-16 [appearance:textfield] bg-transparent px-2 py-1 text-right text-sm text-white focus:bg-gray-800 focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 													title="Amount you have"
@@ -1024,10 +1351,10 @@
 												<span class="px-1 text-gray-500">/</span>
 												<input
 													type="number"
-													value={listItem.quantity}
+													value={entry.quantity}
 													onchange={(e) =>
-														handleQuantityChange(
-															listItem.itemId,
+														handleEntryQuantityChange(
+															entry.id,
 															parseInt(e.currentTarget.value) || 1
 														)}
 													min="1"
@@ -1053,9 +1380,9 @@
 												{/if}
 											</div>
 											<button
-												onclick={() => handleRemoveItem(listItem.itemId)}
+												onclick={() => handleRemoveEntry(entry.id)}
 												class="rounded p-1 text-gray-400 hover:bg-gray-700 hover:text-red-400"
-												aria-label="Remove item"
+												aria-label="Remove entry"
 											>
 												<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path
@@ -1113,12 +1440,12 @@
 				<!-- Search -->
 				<div class="border-b border-gray-700 p-4">
 					<input
+						bind:this={searchInputEl}
 						type="text"
 						value={searchQuery}
 						oninput={(e) => handleSearch(e.currentTarget.value)}
 						placeholder="Search items by name..."
 						class="w-full rounded-lg border border-gray-600 bg-gray-700 px-4 py-3 text-lg text-white placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-						autofocus
 					/>
 					{#if searchQuery.length > 0 && searchQuery.length < 2}
 						<p class="mt-2 text-sm text-gray-400">Type at least 2 characters to search</p>
@@ -1131,7 +1458,7 @@
 						<div class="space-y-2">
 							{#each searchResults as item (item.id)}
 								{@const searchIconUrl = getItemIconUrl(item.iconAssetName)}
-								{@const isInList = list?.items.some((li) => li.itemId === item.id)}
+								{@const isInList = list?.entries.some((e) => isItemEntry(e) && e.itemId === item.id)}
 								{@const recipes = getSortedRecipes(item.id)}
 								{@const selectedRecipeId =
 									getSelectedRecipe(item.id) ?? getDefaultRecipeId(item.id)}
@@ -1293,22 +1620,25 @@
 				<div class="mt-4 space-y-4">
 					{#each [...sourcesByClaim.value.entries()] as [claimId, sources] (claimId)}
 						{@const claimName =
-							claimId === 'player' ? 'Player Inventory' : sources[0]?.claimName || claimId}
+							claimId === 'player'
+								? 'Player Inventory'
+								: sources[0]?.claimName ||
+									settings.accessibleClaims.find((c) => c.entityId === claimId)?.name ||
+									claimId}
 						{@const allSelected = sources.every(
 							(s) => selectedSourceIds.length === 0 || selectedSourceIds.includes(s.id)
 						)}
 
 						<div class="rounded-lg border border-gray-600 p-3">
-							<div class="flex items-center justify-between">
+							<label class="flex cursor-pointer items-center gap-2">
+								<input
+									type="checkbox"
+									checked={allSelected}
+									onchange={() => toggleAllSources(claimId, !allSelected)}
+									class="rounded border-gray-500 bg-gray-700 text-blue-600 focus:ring-blue-500"
+								/>
 								<span class="font-medium text-white">{claimName}</span>
-								<button
-									type="button"
-									onclick={() => toggleAllSources(claimId, !allSelected)}
-									class="text-sm text-blue-400 hover:text-blue-300"
-								>
-									{allSelected ? 'Deselect All' : 'Select All'}
-								</button>
-							</div>
+							</label>
 							<div class="mt-2 space-y-1">
 								{#each sources as source (source.id)}
 									<label
@@ -1355,27 +1685,164 @@
 		</div>
 	{/if}
 
+	<!-- Recipe Selection Modal -->
+	{#if showRecipeModal && recipeModalItemId}
+		{@const item = getItemById(recipeModalItemId)}
+		{@const recipes = findRecipesForItem(recipeModalItemId)}
+		{@const validRecipes = recipes.filter(r => {
+			const hasItemIngredients = r.ingredients.length > 0;
+			const hasCargoIngredients = (r.cargoIngredients?.length ?? 0) > 0;
+			if (!hasItemIngredients && !hasCargoIngredients) return false;
+			if (hasItemIngredients && !r.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+			if (!recipeModalItemId) return false;
+			const outputItem = getItemById(recipeModalItemId);
+			if (!outputItem || outputItem.tier === -1) return true;
+			return !r.ingredients.some(ing => {
+				const ingItem = getItemById(ing.itemId);
+				if (!ingItem || ingItem.tier === -1) return false;
+				return ingItem.tier > outputItem.tier;
+			});
+		})}
+		{@const sortedRecipes = validRecipes.sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity))}
+
+		<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+			<button type="button" class="absolute inset-0 bg-black/70" onclick={closeRecipeModal} aria-label="Close modal"></button>
+
+			<div class="relative max-h-[80vh] w-full max-w-2xl overflow-auto rounded-lg bg-gray-800 shadow-xl">
+				<!-- Header -->
+				<div class="flex items-center justify-between border-b border-gray-700 p-4">
+					<h3 class="text-lg font-semibold text-white">Select Recipe for {item?.name}</h3>
+					<button onclick={closeRecipeModal} class="rounded p-1 text-gray-400 hover:text-white" aria-label="Close">
+						<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+						</svg>
+					</button>
+				</div>
+
+				<!-- Recipe cards -->
+				<div class="space-y-3 p-4">
+					{#each sortedRecipes as recipe, i (recipe.id)}
+						{@const isSelected = selectedModalRecipeId === recipe.id}
+						{@const isDefault = i === 0}
+						<label class="block cursor-pointer">
+							<div class="rounded-lg border p-3 transition-colors
+								{isSelected
+									? 'bg-blue-900/40 border-blue-500 ring-2 ring-blue-500'
+									: 'bg-gray-700 border-gray-600 hover:bg-gray-650'}">
+								<div class="flex items-start justify-between">
+									<div class="flex items-center gap-3">
+										<input
+											type="radio"
+											name="recipe-select"
+											value={recipe.id}
+											checked={isSelected}
+											onchange={() => selectedModalRecipeId = recipe.id}
+											class="mt-1"
+										/>
+										<div>
+											<div class="flex items-center gap-2">
+												<span class="font-medium text-white">
+													{recipe.craftingStationName || 'Crafting'}
+													{#if recipe.craftingStationTier}
+														<span class="text-gray-400">T{recipe.craftingStationTier}</span>
+													{/if}
+												</span>
+												{#if isDefault}
+													<span class="rounded bg-green-900/50 px-2 py-0.5 text-xs text-green-300">
+														★ Cheapest
+													</span>
+												{/if}
+											</div>
+											<div class="mt-1 text-sm text-gray-400">
+												Output: ×{recipe.outputQuantity}
+											</div>
+										</div>
+									</div>
+									{#if recipe.cost !== undefined}
+										<span class="text-green-400 font-medium">{formatCost(recipe.cost)}</span>
+									{/if}
+								</div>
+
+								<!-- Ingredients -->
+								<div class="mt-3 space-y-1 pl-8">
+									{#each recipe.ingredients as ing}
+										{@const ingItem = getItemById(ing.itemId)}
+										{@const ingIcon = ingItem ? getItemIconUrl(ingItem.iconAssetName) : null}
+										<div class="flex items-center gap-2 text-sm">
+											<div class="h-5 w-5 flex items-center justify-center bg-gray-800 rounded">
+												{#if ingIcon}
+													<img src={ingIcon} alt="" class="h-4 w-4 object-contain" />
+												{/if}
+											</div>
+											<span class="text-gray-300">{ingItem?.name || `Item #${ing.itemId}`}</span>
+											<span class="text-blue-400">×{ing.quantity}</span>
+										</div>
+									{/each}
+									{#if recipe.cargoIngredients}
+										{#each recipe.cargoIngredients as cargoIng}
+											{@const cargo = getCargoById(cargoIng.cargoId)}
+											{@const cargoIcon = cargo ? getItemIconUrl(cargo.iconAssetName) : null}
+											<div class="flex items-center gap-2 text-sm">
+												<div class="h-5 w-5 flex items-center justify-center bg-gray-800 rounded">
+													{#if cargoIcon}
+														<img src={cargoIcon} alt="" class="h-4 w-4 object-contain" />
+													{/if}
+												</div>
+												<span class="text-gray-300">{cargo?.name || `Cargo #${cargoIng.cargoId}`}</span>
+												<span class="text-amber-400">×{cargoIng.quantity}</span>
+											</div>
+										{/each}
+									{/if}
+								</div>
+							</div>
+						</label>
+					{/each}
+				</div>
+
+				<!-- Footer -->
+				<div class="border-t border-gray-700 p-4 flex justify-end gap-3">
+					<button
+						type="button"
+						onclick={closeRecipeModal}
+						class="rounded-lg px-4 py-2 text-gray-400 hover:bg-gray-700"
+					>
+						Cancel
+					</button>
+					<button
+						type="button"
+						onclick={applyRecipeSelection}
+						class="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
+					>
+						Apply
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	<!-- Material Row Snippet -->
-	{#snippet materialRow(mat: MaterialRequirement, matIconUrl: string | null, effectiveHave: number, isComplete: boolean)}
+	{#snippet materialRow(mat: MaterialRequirement, matIconUrl: string | null, effectiveHave: number, isComplete: boolean, rowIndex: number = 0)}
+		{@const matKey = getMaterialKey(mat)}
+		{@const matName = getMaterialName(mat)}
+		{@const isCargo = mat.nodeType === 'cargo'}
+		{@const isChecked = checkedOff.has(matKey) || isComplete}
+		{@const isStriped = settings.stripedRows && rowIndex % 2 === 1}
 		<div
-			class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete
-				? 'opacity-50'
-				: ''}"
+			class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete ? 'opacity-50' : ''}"
+			style:background-color={isStriped ? 'rgba(55, 65, 81, 0.8)' : undefined}
 		>
 			<!-- Checkbox -->
 			<button
 				type="button"
-				onclick={() => toggleCheckedOff(mat.itemId)}
-				class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isCheckedOff(
-					mat.itemId
-				)
+				onclick={() => toggleCheckedOffByKey(matKey)}
+				class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border {isChecked
 					? 'border-green-500 bg-green-600'
 					: 'border-gray-500 hover:border-gray-400'}"
-				aria-label={isCheckedOff(mat.itemId)
+				aria-label={checkedOff.has(matKey)
 					? 'Unmark as complete'
 					: 'Mark as complete'}
 			>
-				{#if isCheckedOff(mat.itemId)}
+				{#if isChecked}
 					<svg
 						class="h-3 w-3 text-white"
 						fill="none"
@@ -1391,47 +1858,128 @@
 					</svg>
 				{/if}
 			</button>
-			<!-- Icon + Name with Recipe Popover -->
-			<RecipePopover itemId={mat.itemId}>
-				<div class="flex w-full cursor-help items-center gap-3">
+			<!-- Icon + Name (with Recipe Popover for items only) -->
+			{#if isItemMaterial(mat) && mat.itemId !== undefined}
+				{@const recipes = findRecipesForItem(mat.itemId)}
+				{@const validRecipes = recipes.filter(r => {
+					const hasItemIngredients = r.ingredients.length > 0;
+					const hasCargoIngredients = (r.cargoIngredients?.length ?? 0) > 0;
+					if (!hasItemIngredients && !hasCargoIngredients) return false;
+					if (hasItemIngredients && !r.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+					if (!mat.itemId) return false;
+					const outputItem = getItemById(mat.itemId);
+					if (!outputItem || outputItem.tier === -1) return true;
+					return !r.ingredients.some(ing => {
+						const ingItem = getItemById(ing.itemId);
+						if (!ingItem || ingItem.tier === -1) return false;
+						return ingItem.tier > outputItem.tier;
+					});
+				})}
+				<RecipePopover itemId={mat.itemId}>
+					<div class="flex w-full cursor-help items-center gap-3">
+						<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+							{#if matIconUrl}
+								<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
+							{:else}
+								<span class="text-gray-500">?</span>
+							{/if}
+						</div>
+						<div class="flex flex-1 items-center gap-1 min-w-0">
+							<span class="truncate text-sm text-white">{matName}</span>
+							{#if validRecipes.length > 1}
+								{@const currentRecipeId = recipePreferences.get(matKey)}
+								{@const sortedRecipes = validRecipes.sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity))}
+								{@const defaultRecipeId = sortedRecipes[0]?.id}
+								{@const isNonDefault = currentRecipeId !== undefined && currentRecipeId !== defaultRecipeId}
+								<button
+									type="button"
+									onclick={() => openRecipeModal(mat)}
+									class="relative flex-shrink-0 p-0.5 rounded border text-xs transition-colors
+										{isNonDefault
+											? 'bg-blue-900/40 border-blue-500 text-blue-300'
+											: 'bg-gray-700 border-gray-600 text-gray-400 hover:bg-gray-600'}"
+									title="Select recipe"
+									aria-label="Select recipe for {matName}"
+								>
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+										<path d="m15 12-8.5 8.5c-.83.83-2.17.83-3 0 0 0 0 0 0 0a2.12 2.12 0 0 1 0-3L12 9"/>
+										<path d="M17.64 15 22 10.64"/>
+										<path d="m20.91 11.7-1.25-1.25c-.6-.6-.93-1.4-.93-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 1 12 8.4v1.56l2 2h2.47l2.26 1.91"/>
+									</svg>
+									{#if isNonDefault}
+										<span class="absolute -top-0.5 -right-0.5 inline-block w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+									{/if}
+								</button>
+							{/if}
+						</div>
+						{#if import.meta.env.DEV && mat.item?.materialCost !== undefined}
+							<span
+								class="w-12 flex-shrink-0 text-right text-xs text-green-400"
+								title="Material cost: {mat.item.materialCost.toFixed(2)}"
+								>{formatCost(mat.item.materialCost)}</span
+							>
+						{/if}
+					</div>
+				</RecipePopover>
+			{:else}
+				<!-- Cargo - no recipe popover -->
+				<div class="flex w-full items-center gap-3">
 					<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
 						{#if matIconUrl}
 							<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
 						{:else}
-							<span class="text-gray-500">?</span>
+							<span class="text-gray-500">📦</span>
 						{/if}
 					</div>
-					<span class="flex-1 truncate text-sm text-white"
-						>{mat.item?.name || `Item #${mat.itemId}`}</span
-					>
-					{#if import.meta.env.DEV && mat.item?.materialCost !== undefined}
-						<span
-							class="w-12 flex-shrink-0 text-right text-xs text-green-400"
-							title="Material cost: {mat.item.materialCost.toFixed(2)}"
-							>{formatCost(mat.item.materialCost)}</span
-						>
-					{/if}
+					<span class="flex-1 truncate text-sm text-white">{matName}</span>
+					<span class="text-xs text-amber-400">(Cargo)</span>
 				</div>
-			</RecipePopover>
-			{#if import.meta.env.DEV && mat.rootContributions?.length}
-				<DevRequirementBreakdown contributions={mat.rootContributions}>
-					<span
-						class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums border-b border-dashed border-yellow-600/50"
-						>x{formatQty(mat.baseRequired)}</span
-					>
-				</DevRequirementBreakdown>
-			{:else}
+			{/if}
+			{#if isItemMaterial(mat) && mat.itemId !== undefined}
 				<HaveBreakdownTooltip
 					itemId={mat.itemId}
 					listSourceIds={list?.enabledSourceIds ?? []}
-					manualAmount={getManualHave(mat.itemId)}
-					isCheckedOff={isCheckedOff(mat.itemId)}
+					manualAmount={getManualHaveByKey(matKey)}
+					isCheckedOff={checkedOff.has(matKey)}
 					parentContributions={mat.parentContributions}
 				>
-					<span
-						class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
-						>x{formatQty(mat.baseRequired)}</span
-					>
+					{#if import.meta.env.DEV && mat.rootContributions?.length}
+						<!-- DEV: Wrap with DevRequirementBreakdown for Shift+hover -->
+						<DevRequirementBreakdown contributions={mat.rootContributions}>
+							<span
+								class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums border-b border-dashed border-yellow-600/50"
+								>x{formatQty(mat.baseRequired)}</span
+							>
+						</DevRequirementBreakdown>
+					{:else}
+						<span
+							class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
+							>x{formatQty(mat.baseRequired)}</span
+						>
+					{/if}
+				</HaveBreakdownTooltip>
+			{:else}
+				<!-- Cargo - show cargo inventory sources -->
+				<HaveBreakdownTooltip
+					cargoId={mat.cargoId}
+					listSourceIds={list?.enabledSourceIds ?? []}
+					manualAmount={getManualHaveByKey(matKey)}
+					isCheckedOff={checkedOff.has(matKey)}
+					parentContributions={mat.parentContributions}
+				>
+					{#if import.meta.env.DEV && mat.rootContributions?.length}
+						<DevRequirementBreakdown contributions={mat.rootContributions}>
+							<span
+								class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums border-b border-dashed border-yellow-600/50"
+								>x{formatQty(mat.baseRequired)}</span
+							>
+						</DevRequirementBreakdown>
+					{:else}
+						<span
+							class="w-16 flex-shrink-0 text-right text-sm text-blue-400 tabular-nums"
+							>x{formatQty(mat.baseRequired)}</span
+						>
+					{/if}
 				</HaveBreakdownTooltip>
 			{/if}
 			<!-- Have / Need / Remaining -->
@@ -1446,9 +1994,9 @@
 				>
 					<input
 						type="number"
-						value={getManualHave(mat.itemId) ?? mat.have}
+						value={manualHave.get(matKey) ?? mat.have}
 						onchange={(e) =>
-							setManualHave(mat.itemId, parseInt(e.currentTarget.value) || 0)}
+							setManualHaveByKey(matKey, parseInt(e.currentTarget.value) || 0)}
 						min="0"
 						class="w-16 [appearance:textfield] bg-transparent px-2 py-1 text-right text-sm text-white focus:bg-gray-800 focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 						title="Amount you have"

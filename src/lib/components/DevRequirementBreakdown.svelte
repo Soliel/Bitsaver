@@ -8,6 +8,8 @@
 
 	let { contributions, children }: Props = $props();
 	let showPopover = $state(false);
+	let isHovering = $state(false);
+	let shiftHeld = $state(false);
 	let triggerEl = $state<HTMLElement | null>(null);
 	let popoverStyle = $state('');
 
@@ -30,26 +32,50 @@
 		popoverStyle = `left: ${left}px; bottom: ${window.innerHeight - top}px;`;
 	}
 
-	function handleMouseEnter() {
-		if (contributions.length > 0) {
+	function updatePopoverVisibility() {
+		if (contributions.length > 0 && isHovering && shiftHeld) {
 			updatePosition();
 			showPopover = true;
+		} else {
+			showPopover = false;
 		}
 	}
 
+	function handleMouseEnter() {
+		isHovering = true;
+		updatePopoverVisibility();
+	}
+
 	function handleMouseLeave() {
+		isHovering = false;
 		showPopover = false;
+	}
+
+	function handleKeyDown(e: KeyboardEvent) {
+		if (e.key === 'Shift' && !shiftHeld) {
+			shiftHeld = true;
+			updatePopoverVisibility();
+		}
+	}
+
+	function handleKeyUp(e: KeyboardEvent) {
+		if (e.key === 'Shift') {
+			shiftHeld = false;
+			showPopover = false;
+		}
 	}
 
 	const total = $derived(contributions.reduce((sum, c) => sum + c.contribution, 0));
 </script>
+
+<svelte:window onkeydown={handleKeyDown} onkeyup={handleKeyUp} />
 
 <span
 	bind:this={triggerEl}
 	onmouseenter={handleMouseEnter}
 	onmouseleave={handleMouseLeave}
 	role="tooltip"
-	class="inline-block cursor-help"
+	class="inline-block"
 >
 	{@render children()}
 </span>

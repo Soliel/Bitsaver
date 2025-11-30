@@ -59,6 +59,7 @@ export interface Recipe {
 	craftingStationName?: string;
 	craftingStationTier?: number;
 	ingredients: RecipeIngredient[];
+	cargoIngredients?: CargoIngredient[]; // Cargo requirements (e.g., ore cargo, log cargo)
 	levelRequirements: LevelRequirement[];
 	toolRequirements: ToolRequirement[];
 	// Pre-computed cost (from material_costs.json)
@@ -116,6 +117,24 @@ export interface ItemListPossibility {
 	chance: number;
 }
 
+// Cargo item (from cargo_desc.json)
+export interface Cargo {
+	id: number;
+	name: string;
+	description: string;
+	iconAssetName: string;
+	tier: number;
+	tag: string; // "Animal", "Fish", "Plant", "Wood Log", etc.
+	rarity: string;
+	volume: number;
+}
+
+// Cargo ingredient in a recipe
+export interface CargoIngredient {
+	cargoId: number;
+	quantity: number;
+}
+
 // Building from /api/buildings
 export interface Building {
 	entityId: string;
@@ -145,9 +164,14 @@ export interface BuildingFunction {
 	power: number;
 }
 
+// Node type discriminator for material trees
+export type MaterialNodeType = 'item' | 'cargo';
+
 // Material tree node for crafting calculations
 export interface MaterialNode {
-	item: Item;
+	nodeType: MaterialNodeType;
+	item?: Item; // Present when nodeType === 'item'
+	cargo?: Cargo; // Present when nodeType === 'cargo'
 	quantity: number;
 	tier: number;
 	children: MaterialNode[];
@@ -156,8 +180,11 @@ export interface MaterialNode {
 
 // Flattened material for display
 export interface FlatMaterial {
-	itemId: number;
-	item: Item;
+	nodeType: MaterialNodeType;
+	itemId?: number; // Present when nodeType === 'item'
+	cargoId?: number; // Present when nodeType === 'cargo'
+	item?: Item; // Present when nodeType === 'item'
+	cargo?: Cargo; // Present when nodeType === 'cargo'
 	quantity: number;
 	tier: number;
 	step: number; // 1 = raw/gathered materials, 2+ = crafted from previous step

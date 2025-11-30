@@ -3,11 +3,12 @@
  * Persisted to IndexedDB
  */
 
-import type { CraftingList, CraftingListItem, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution, RootItemContribution } from '$lib/types/app';
-import type { MaterialNode, FlatMaterial, Item, Recipe } from '$lib/types/game';
+import type { CraftingList, CraftingListItem, CraftingListEntry, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution, RootItemContribution, ItemListEntry, CargoListEntry } from '$lib/types/app';
+import { isItemEntry, isCargoEntry } from '$lib/types/app';
+import type { MaterialNode, FlatMaterial, Item, Recipe, Cargo, MaterialNodeType } from '$lib/types/game';
 import { getCachedLists, getCachedList, saveList, deleteList as deleteCachedList, deleteListProgress } from '$lib/services/cache';
-import { gameData, getItemById, getItemWithRecipes } from './game-data.svelte';
-import { allocateMaterialsFromSources, getAggregatedInventoryForSources } from './inventory.svelte';
+import { gameData, getItemById, getItemWithRecipes, getCargoById } from './game-data.svelte';
+import { allocateMaterialsFromSources, getAggregatedInventoryForSources, getAggregatedCargoForSources } from './inventory.svelte';
 
 /**
  * Convert a reactive proxy to a plain object for IndexedDB storage
@@ -29,26 +30,55 @@ export const crafting = $state({
 const listTreeCache = new Map<string, { trees: MaterialNode[]; listItemsHash: string }>();
 
 /**
- * Generate a hash of list items to detect changes
+ * Generate a hash of list entries to detect changes
+ * Includes recipe preferences to trigger cache invalidation when recipes change
  */
-function hashListItems(items: CraftingListItem[]): string {
-	return items.map(i => `${i.itemId}:${i.quantity}:${i.recipeId || 0}`).join('|');
+function hashListEntries(entries: CraftingListEntry[], recipePreferences?: Map<string, number>): string {
+	const entryHash = entries.map(e => {
+		if (isItemEntry(e)) {
+			return `i:${e.itemId}:${e.quantity}:${e.recipeId || 0}`;
+		} else {
+			return `c:${e.cargoId}:${e.quantity}`;
+		}
+	}).join('|');
+
+	if (!recipePreferences || recipePreferences.size === 0) {
+		return entryHash;
+	}
+
+	// Sort preferences for consistent hashing
+	const prefsArray = Array.from(recipePreferences.entries()).sort(([a], [b]) => a.localeCompare(b));
+	const prefsHash = prefsArray.map(([key, recipeId]) => `r:${key}:${recipeId}`).join('|');
+
+	return `${entryHash}::${prefsHash}`;
 }
 
 /**
- * Build full material trees for a list (called when list items change)
+ * Build full material trees for a list (called when list entries change)
+ * @param recipePreferences - Optional map of recipe preferences for items in the tree
  */
-async function buildListTrees(list: CraftingList): Promise<MaterialNode[]> {
+async function buildListTrees(list: CraftingList, recipePreferences?: Map<string, number>): Promise<MaterialNode[]> {
 	const trees: MaterialNode[] = [];
 
-	for (const listItem of list.items) {
-		const tree = await calculateMaterialTree(
-			listItem.itemId,
-			listItem.quantity,
-			listItem.recipeId
-		);
-		if (tree) {
-			trees.push(tree);
+	for (const entry of list.entries) {
+		if (isItemEntry(entry)) {
+			const tree = await calculateMaterialTree(
+				entry.itemId,
+				entry.quantity,
+				entry.recipeId,
+				recipePreferences // Pass preferences to tree calculation
+			);
+			if (tree) {
+				trees.push(tree);
+			}
+		} else if (isCargoEntry(entry)) {
+			const tree = calculateCargoMaterialTree(
+				entry.cargoId,
+				entry.quantity
+			);
+			if (tree) {
+				trees.push(tree);
+			}
 		}
 	}
 
@@ -56,18 +86,38 @@ async function buildListTrees(list: CraftingList): Promise<MaterialNode[]> {
 }
 
 /**
- * Get or build cached trees for a list
+ * Calculate material tree for a cargo item (always a leaf node)
  */
-async function getListTrees(list: CraftingList): Promise<MaterialNode[]> {
-	const currentHash = hashListItems(list.items);
+function calculateCargoMaterialTree(
+	cargoId: number,
+	quantity: number
+): MaterialNode | null {
+	const cargo = getCargoById(cargoId);
+	if (!cargo) return null;
+
+	return {
+		nodeType: 'cargo',
+		cargo,
+		quantity,
+		tier: cargo.tier,
+		children: []
+	};
+}
+
+/**
+ * Get or build cached trees for a list
+ * @param recipePreferences - Optional map of recipe preferences for cache invalidation
+ */
+async function getListTrees(list: CraftingList, recipePreferences?: Map<string, number>): Promise<MaterialNode[]> {
+	const currentHash = hashListEntries(list.entries, recipePreferences);
 	const cached = listTreeCache.get(list.id);
 
 	if (cached && cached.listItemsHash === currentHash) {
 		return cached.trees;
 	}
 
-	// Build new trees
-	const trees = await buildListTrees(list);
+	// Build new trees with recipe preferences
+	const trees = await buildListTrees(list, recipePreferences);
 	listTreeCache.set(list.id, { trees, listItemsHash: currentHash });
 
 	return trees;
@@ -82,58 +132,112 @@ function clearListTreeCache(listId: string): void {
 
 /**
  * Result from computeRemainingNeeds
+ * Uses string keys to support both items (item-123) and cargo (cargo-456)
  */
 interface ComputeRemainingNeedsResult {
-	needs: Map<number, { baseRequired: number; remaining: number }>;
-	parentContributions: Map<number, Array<{ parentItemId: number; parentQuantityUsed: number; coverage: number }>>;
+	needs: Map<string, { baseRequired: number; remaining: number }>;
+	parentContributions: Map<string, Array<{ parentNodeKey: string; parentQuantityUsed: number; coverage: number }>>;
+}
+
+/**
+ * Get node key for a material node
+ */
+function getNodeKey(node: MaterialNode): string {
+	if (node.nodeType === 'cargo') {
+		return `cargo-${node.cargo!.id}`;
+	}
+	return `item-${node.item!.id}`;
+}
+
+/**
+ * Get node ID (for backwards compatibility)
+ */
+function getNodeId(node: MaterialNode): number {
+	if (node.nodeType === 'cargo') {
+		return node.cargo!.id;
+	}
+	return node.item!.id;
 }
 
 /**
  * Compute remaining needs by propagating inventory through the tree
  * @param trees - Material trees to process
- * @param have - Map of itemId -> quantity you have
+ * @param haveItems - Map of itemId -> quantity you have
+ * @param haveCargo - Map of cargoId -> quantity you have
  * @param checkedOff - Set of itemIds that are manually marked complete
  * Returns: needs map and parent contributions map
  */
 function computeRemainingNeeds(
 	trees: MaterialNode[],
-	have: Map<number, number>,
+	haveItems: Map<number, number>,
+	haveCargo: Map<number, number>,
 	checkedOff?: Set<number>
 ): ComputeRemainingNeedsResult {
-	const needs = new Map<number, { baseRequired: number; remaining: number }>();
-	const parentContributions = new Map<number, Array<{ parentItemId: number; parentQuantityUsed: number; coverage: number }>>();
+	const needs = new Map<string, { baseRequired: number; remaining: number }>();
+	const parentContributions = new Map<string, Array<{ parentNodeKey: string; parentQuantityUsed: number; coverage: number }>>();
 
 	// Track how much inventory we've "used" across tree branches
-	const usedInventory = new Map<number, number>();
+	const usedItemInventory = new Map<number, number>();
+	const usedCargoInventory = new Map<number, number>();
 
 	// Helper to record a parent's contribution to a child
-	function recordContribution(childItemId: number, parentItemId: number, parentQuantityUsed: number, coverage: number) {
+	function recordContribution(childKey: string, parentKey: string, parentQuantityUsed: number, coverage: number) {
 		if (coverage <= 0 || parentQuantityUsed <= 0) return;
-		const existing = parentContributions.get(childItemId) || [];
-		existing.push({ parentItemId, parentQuantityUsed, coverage });
-		parentContributions.set(childItemId, existing);
+		const existing = parentContributions.get(childKey) || [];
+		existing.push({ parentNodeKey: parentKey, parentQuantityUsed, coverage });
+		parentContributions.set(childKey, existing);
 	}
 
 	// Recursively record coverage for all descendants when an ancestor has full coverage
-	function recordCoverageForDescendants(node: MaterialNode, ancestorItemId: number, ancestorQuantityUsed: number) {
+	function recordCoverageForDescendants(node: MaterialNode, ancestorKey: string, ancestorQuantityUsed: number) {
 		for (const child of node.children) {
-			recordContribution(child.item.id, ancestorItemId, ancestorQuantityUsed, child.quantity);
+			const childKey = getNodeKey(child);
+			recordContribution(childKey, ancestorKey, ancestorQuantityUsed, child.quantity);
 			// Recurse to grandchildren
 			if (child.children.length > 0) {
-				recordCoverageForDescendants(child, ancestorItemId, ancestorQuantityUsed);
+				recordCoverageForDescendants(child, ancestorKey, ancestorQuantityUsed);
 			}
 		}
 	}
 
 	function traverse(node: MaterialNode, neededQuantity: number): void {
-		const itemId = node.item.id;
+		const nodeKey = getNodeKey(node);
+
+		// Handle cargo nodes - they now have inventory tracking
+		if (node.nodeType === 'cargo') {
+			const cargoId = node.cargo!.id;
+
+			// Get current inventory and how much we've already used
+			const totalHave = haveCargo.get(cargoId) || 0;
+			const alreadyUsed = usedCargoInventory.get(cargoId) || 0;
+			const availableToUse = Math.max(0, totalHave - alreadyUsed);
+
+			// How much can we satisfy from inventory?
+			const useFromInventory = Math.min(availableToUse, neededQuantity);
+			if (useFromInventory > 0) {
+				usedCargoInventory.set(cargoId, alreadyUsed + useFromInventory);
+			}
+
+			// Remaining after using inventory
+			const stillNeeded = neededQuantity - useFromInventory;
+
+			const existing = needs.get(nodeKey) || { baseRequired: 0, remaining: 0 };
+			existing.baseRequired += neededQuantity;
+			existing.remaining += stillNeeded;
+			needs.set(nodeKey, existing);
+			// Cargo has no children, so we're done
+			return;
+		}
+
+		// Item node handling
+		const itemId = node.item!.id;
 
 		// If item is checked off, treat as fully satisfied
 		const isCheckedOff = checkedOff?.has(itemId) ?? false;
 
 		// Get current inventory and how much we've already used
-		const totalHave = have.get(itemId) || 0;
-		const alreadyUsed = usedInventory.get(itemId) || 0;
+		const totalHave = haveItems.get(itemId) || 0;
+		const alreadyUsed = usedItemInventory.get(itemId) || 0;
 
 		// If checked off, available is infinite (use full needed amount)
 		const availableToUse = isCheckedOff
@@ -143,17 +247,17 @@ function computeRemainingNeeds(
 		// How much can we satisfy from inventory (or checked off)?
 		const useFromInventory = Math.min(availableToUse, neededQuantity);
 		if (useFromInventory > 0 && !isCheckedOff) {
-			usedInventory.set(itemId, alreadyUsed + useFromInventory);
+			usedItemInventory.set(itemId, alreadyUsed + useFromInventory);
 		}
 
 		// Remaining after using inventory
 		const stillNeeded = neededQuantity - useFromInventory;
 
 		// Aggregate base requirements and remaining needs
-		const existing = needs.get(itemId) || { baseRequired: 0, remaining: 0 };
+		const existing = needs.get(nodeKey) || { baseRequired: 0, remaining: 0 };
 		existing.baseRequired += neededQuantity;
 		existing.remaining += stillNeeded;
-		needs.set(itemId, existing);
+		needs.set(nodeKey, existing);
 
 		// Handle children - track parent contributions
 		if (node.children.length > 0 && node.recipeUsed) {
@@ -164,18 +268,19 @@ function computeRemainingNeeds(
 				const craftCount = Math.ceil(stillNeeded / node.recipeUsed.outputQuantity);
 
 				for (const child of node.children) {
+					const childKey = getNodeKey(child);
 					const childOriginal = child.quantity;
 					const childNeeded = Math.ceil(childOriginal * craftCount / originalCraftCount);
 					const childCoverage = childOriginal - childNeeded;
 
 					// Record partial coverage from this parent's inventory
 					if (childCoverage > 0 && useFromInventory > 0 && !isCheckedOff) {
-						recordContribution(child.item.id, itemId, useFromInventory, childCoverage);
+						recordContribution(childKey, nodeKey, useFromInventory, childCoverage);
 						// Also record coverage for grandchildren that won't be crafted
 						if (child.children.length > 0 && childCoverage > 0) {
 							// Calculate the portion of the child subtree that's covered
 							const coveredRatio = childCoverage / childOriginal;
-							recordPartialCoverageForDescendants(child, itemId, useFromInventory, coveredRatio);
+							recordPartialCoverageForDescendants(child, nodeKey, useFromInventory, coveredRatio);
 						}
 					}
 
@@ -183,19 +288,20 @@ function computeRemainingNeeds(
 				}
 			} else if (useFromInventory > 0 && !isCheckedOff) {
 				// Full coverage: record coverage for ALL descendants in subtree
-				recordCoverageForDescendants(node, itemId, useFromInventory);
+				recordCoverageForDescendants(node, nodeKey, useFromInventory);
 			}
 		}
 	}
 
 	// Record partial coverage for descendants based on coverage ratio
-	function recordPartialCoverageForDescendants(node: MaterialNode, ancestorItemId: number, ancestorQuantityUsed: number, coverageRatio: number) {
+	function recordPartialCoverageForDescendants(node: MaterialNode, ancestorKey: string, ancestorQuantityUsed: number, coverageRatio: number) {
 		for (const child of node.children) {
+			const childKey = getNodeKey(child);
 			const coverage = Math.floor(child.quantity * coverageRatio);
 			if (coverage > 0) {
-				recordContribution(child.item.id, ancestorItemId, ancestorQuantityUsed, coverage);
+				recordContribution(childKey, ancestorKey, ancestorQuantityUsed, coverage);
 				if (child.children.length > 0) {
-					recordPartialCoverageForDescendants(child, ancestorItemId, ancestorQuantityUsed, coverageRatio);
+					recordPartialCoverageForDescendants(child, ancestorKey, ancestorQuantityUsed, coverageRatio);
 				}
 			}
 		}
@@ -220,6 +326,33 @@ export function getListCount(): number {
 }
 
 /**
+ * Migrate old list format (items) to new format (entries)
+ */
+function migrateList(list: CraftingList & { items?: CraftingListItem[] }): CraftingList {
+	// If list has old 'items' property but no 'entries', migrate it
+	if (list.items && !list.entries) {
+		const entries: CraftingListEntry[] = list.items.map((item) => ({
+			id: item.id,
+			type: 'item' as const,
+			itemId: item.itemId,
+			quantity: item.quantity,
+			recipeId: item.recipeId,
+			addedAt: item.addedAt
+		}));
+		return {
+			...list,
+			entries,
+			items: undefined // Remove old property
+		} as CraftingList;
+	}
+	// If entries is undefined, initialize to empty array
+	if (!list.entries) {
+		return { ...list, entries: [] };
+	}
+	return list;
+}
+
+/**
  * Initialize crafting lists from cache
  */
 export async function initializeCrafting(): Promise<void> {
@@ -227,7 +360,16 @@ export async function initializeCrafting(): Promise<void> {
 
 	try {
 		const lists = await getCachedLists();
-		crafting.lists = lists;
+		// Migrate old format lists to new format
+		const migratedLists = lists.map(migrateList);
+		crafting.lists = migratedLists;
+
+		// Save any migrated lists back to cache
+		for (let i = 0; i < lists.length; i++) {
+			if (lists[i] !== migratedLists[i]) {
+				await saveList(toPlainList(migratedLists[i]));
+			}
+		}
 	} catch (e) {
 		console.error('Failed to initialize crafting lists:', e);
 		crafting.error = e instanceof Error ? e.message : 'Failed to load crafting lists';
@@ -245,7 +387,7 @@ export async function createList(name: string, description?: string): Promise<Cr
 		id: crypto.randomUUID(),
 		name,
 		description,
-		items: [],
+		entries: [],
 		enabledSourceIds: [], // Empty means use all available sources
 		createdAt: now,
 		updatedAt: now
@@ -303,19 +445,23 @@ export async function addItemToList(listId: string, itemId: number, quantity: nu
 	const list = crafting.lists.find((l) => l.id === listId);
 	if (!list) return;
 
-	// Check if item already exists with the same recipe
-	const existingItem = list.items.find((i) => i.itemId === itemId && i.recipeId === recipeId);
+	// Check if item entry already exists with the same recipe
+	const existingEntry = list.entries.find(
+		(e) => isItemEntry(e) && e.itemId === itemId && e.recipeId === recipeId
+	);
 
-	if (existingItem) {
-		existingItem.quantity += quantity;
+	if (existingEntry) {
+		existingEntry.quantity += quantity;
 	} else {
-		list.items.push({
+		const newEntry: ItemListEntry = {
 			id: crypto.randomUUID(),
+			type: 'item',
 			itemId,
 			quantity,
 			recipeId,
 			addedAt: Date.now()
-		});
+		};
+		list.entries.push(newEntry);
 	}
 
 	list.updatedAt = Date.now();
@@ -323,7 +469,55 @@ export async function addItemToList(listId: string, itemId: number, quantity: nu
 }
 
 /**
- * Update item quantity in a list
+ * Add cargo to a list
+ */
+export async function addCargoToList(listId: string, cargoId: number, quantity: number): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	// Check if cargo entry already exists
+	const existingEntry = list.entries.find(
+		(e) => isCargoEntry(e) && e.cargoId === cargoId
+	);
+
+	if (existingEntry) {
+		existingEntry.quantity += quantity;
+	} else {
+		const newEntry: CargoListEntry = {
+			id: crypto.randomUUID(),
+			type: 'cargo',
+			cargoId,
+			quantity,
+			addedAt: Date.now()
+		};
+		list.entries.push(newEntry);
+	}
+
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
+
+/**
+ * Update entry quantity in a list
+ */
+export async function updateEntryQuantity(
+	listId: string,
+	entryId: string,
+	quantity: number
+): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	const entry = list.entries.find((e) => e.id === entryId);
+	if (entry) {
+		entry.quantity = Math.max(0, quantity);
+		list.updatedAt = Date.now();
+		await saveList(toPlainList(list));
+	}
+}
+
+/**
+ * Update item quantity in a list (legacy, finds by itemId)
  */
 export async function updateItemQuantity(
 	listId: string,
@@ -333,34 +527,46 @@ export async function updateItemQuantity(
 	const list = crafting.lists.find((l) => l.id === listId);
 	if (!list) return;
 
-	const item = list.items.find((i) => i.itemId === itemId);
-	if (item) {
-		item.quantity = Math.max(0, quantity);
+	const entry = list.entries.find((e) => isItemEntry(e) && e.itemId === itemId);
+	if (entry) {
+		entry.quantity = Math.max(0, quantity);
 		list.updatedAt = Date.now();
 		await saveList(toPlainList(list));
 	}
 }
 
 /**
- * Remove item from a list
+ * Remove entry from a list by entry ID
  */
-export async function removeItemFromList(listId: string, itemId: number): Promise<void> {
+export async function removeEntryFromList(listId: string, entryId: string): Promise<void> {
 	const list = crafting.lists.find((l) => l.id === listId);
 	if (!list) return;
 
-	list.items = list.items.filter((i) => i.itemId !== itemId);
+	list.entries = list.entries.filter((e) => e.id !== entryId);
 	list.updatedAt = Date.now();
 	await saveList(toPlainList(list));
 }
 
 /**
- * Clear all items from a list
+ * Remove item from a list (legacy, finds by itemId)
+ */
+export async function removeItemFromList(listId: string, itemId: number): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	list.entries = list.entries.filter((e) => !(isItemEntry(e) && e.itemId === itemId));
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
+
+/**
+ * Clear all entries from a list
  */
 export async function clearList(listId: string): Promise<void> {
 	const list = crafting.lists.find((l) => l.id === listId);
 	if (!list) return;
 
-	list.items = [];
+	list.entries = [];
 	list.updatedAt = Date.now();
 	await saveList(toPlainList(list));
 }
@@ -377,8 +583,8 @@ export async function duplicateList(listId: string): Promise<CraftingList | null
 		id: crypto.randomUUID(),
 		name: `${original.name} (Copy)`,
 		description: original.description,
-		items: original.items.map((item) => ({
-			...item,
+		entries: original.entries.map((entry) => ({
+			...entry,
 			id: crypto.randomUUID(),
 			addedAt: now
 		})),
@@ -421,11 +627,13 @@ export async function updateListAutoRefresh(listId: string, enabled: boolean): P
 /**
  * Calculate material tree for an item (full tree, no inventory reduction)
  * @param recipeId - Optional specific recipe to use (for top-level item only)
+ * @param recipePreferences - Optional map of recipe preferences for any item in tree
  */
 export async function calculateMaterialTree(
 	itemId: number,
 	quantity: number,
 	recipeId?: number,
+	recipePreferences?: Map<string, number>,
 	depth = 0,
 	maxDepth = 50
 ): Promise<MaterialNode | null> {
@@ -450,6 +658,7 @@ export async function calculateMaterialTree(
 	// Base case: no valid recipes or max depth reached
 	if (recipes.length === 0 || depth >= maxDepth) {
 		return {
+			nodeType: 'item',
 			item,
 			quantity,
 			tier: item.tier,
@@ -457,27 +666,42 @@ export async function calculateMaterialTree(
 		};
 	}
 
-	// Sort recipes by cost and pick the cheapest one
-	// User can override with explicit recipeId if needed
+	// Recipe selection priority:
+	// 1. Explicit recipeId parameter (for top-level from entry.recipeId)
+	// 2. Recipe preferences (for any item in tree)
+	// 3. Default (cheapest recipe)
 	const sortedRecipes = [...recipes].sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity));
-	let recipe = sortedRecipes[0];
+	let recipe: Recipe;
 
-	// Allow user override if specified
 	if (recipeId !== undefined) {
+		// Explicit recipeId has highest priority
 		const selectedRecipe = recipes.find(r => r.id === recipeId);
-		if (selectedRecipe) recipe = selectedRecipe;
+		recipe = selectedRecipe || sortedRecipes[0];
+	} else if (recipePreferences) {
+		// Check recipe preferences for this item
+		const preferredId = recipePreferences.get(`item-${itemId}`);
+		if (preferredId !== undefined) {
+			const preferredRecipe = recipes.find(r => r.id === preferredId);
+			recipe = preferredRecipe || sortedRecipes[0];
+		} else {
+			recipe = sortedRecipes[0]; // Default to cheapest
+		}
+	} else {
+		recipe = sortedRecipes[0]; // Default to cheapest
 	}
 	const craftCount = Math.ceil(quantity / recipe.outputQuantity);
 
 	// Recursively calculate children
 	const children: MaterialNode[] = [];
 
+	// Process item ingredients
 	for (const ingredient of recipe.ingredients) {
-		// Child ingredients use default recipe selection (first available)
+		// Child ingredients can use recipe preferences (passed down)
 		const childNode = await calculateMaterialTree(
 			ingredient.itemId,
 			ingredient.quantity * craftCount,
-			undefined,
+			undefined, // No explicit recipeId for children
+			recipePreferences, // Pass preferences down
 			depth + 1,
 			maxDepth
 		);
@@ -487,7 +711,24 @@ export async function calculateMaterialTree(
 		}
 	}
 
+	// Process cargo ingredients (these are always leaf nodes)
+	if (recipe.cargoIngredients) {
+		for (const cargoIng of recipe.cargoIngredients) {
+			const cargo = getCargoById(cargoIng.cargoId);
+			if (cargo) {
+				children.push({
+					nodeType: 'cargo',
+					cargo,
+					quantity: cargoIng.quantity * craftCount,
+					tier: cargo.tier,
+					children: []
+				});
+			}
+		}
+	}
+
 	return {
+		nodeType: 'item',
 		item,
 		quantity,
 		tier: item.tier,
@@ -547,8 +788,15 @@ function getItemProfession(itemId: number): string {
 
 	// Filter to valid recipes (same logic as getItemNaturalStep)
 	const validRecipes = allRecipes.filter(recipe => {
-		if (recipe.ingredients.length === 0) return false;
-		if (!recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+		// Must have some ingredients (item or cargo)
+		const hasItemIngredients = recipe.ingredients.length > 0;
+		const hasCargoIngredients = (recipe.cargoIngredients?.length ?? 0) > 0;
+		if (!hasItemIngredients && !hasCargoIngredients) return false;
+
+		// All item ingredients must be valid Items
+		if (hasItemIngredients && !recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+
+		// Filter downgrade recipes (only applies to item ingredients)
 		if (item.tier === -1) return true;
 		return !recipe.ingredients.some(ing => {
 			const ingItem = getItemById(ing.itemId);
@@ -557,7 +805,7 @@ function getItemProfession(itemId: number): string {
 		});
 	});
 
-	// No valid crafting recipes with Item inputs
+	// No valid crafting recipes
 	if (validRecipes.length === 0) {
 		// Try extraction recipes first (for gathered/mined materials)
 		const extractionRecipes = itemDetails?.extractionRecipes || [];
@@ -619,14 +867,19 @@ function getItemNaturalStep(itemId: number, visited: Set<number> = new Set()): n
 	const allRecipes = itemDetails?.craftingRecipes || [];
 
 	// Filter recipes to only valid "upgrade" crafting recipes:
-	// 1. All ingredients must be valid Items (can be looked up)
-	// 2. Not a downgrade recipe (output tier >= all input tiers)
+	// 1. Must have some ingredients (item or cargo)
+	// 2. All item ingredients must be valid Items (can be looked up)
+	// 3. Not a downgrade recipe (output tier >= all input tiers)
 	const validRecipes = allRecipes.filter(recipe => {
-		// Must have ingredients and all must be valid Items
-		if (recipe.ingredients.length === 0) return false;
-		if (!recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+		// Must have some ingredients (item or cargo)
+		const hasItemIngredients = recipe.ingredients.length > 0;
+		const hasCargoIngredients = (recipe.cargoIngredients?.length ?? 0) > 0;
+		if (!hasItemIngredients && !hasCargoIngredients) return false;
 
-		// Filter downgrade recipes
+		// All item ingredients must be valid Items
+		if (hasItemIngredients && !recipe.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+
+		// Filter downgrade recipes (only applies to item ingredients)
 		if (item.tier === -1) return true; // Ignore tier -1 output items
 
 		return !recipe.ingredients.some(ing => {
@@ -653,6 +906,11 @@ function getItemNaturalStep(itemId: number, visited: Set<number> = new Set()): n
 		maxIngredientStep = Math.max(maxIngredientStep, ingStep);
 	}
 
+	// Cargo ingredients are step 1, so if we have cargo, min step is 1
+	if (recipe.cargoIngredients && recipe.cargoIngredients.length > 0) {
+		maxIngredientStep = Math.max(maxIngredientStep, 1);
+	}
+
 	const step = maxIngredientStep + 1;
 	itemStepCache.set(itemId, step);
 	return step;
@@ -669,36 +927,81 @@ function getNodeStep(node: MaterialNode): number {
 }
 
 /**
+ * Get a unique key for a material node
+ */
+function getMaterialKey(node: MaterialNode): string {
+	if (node.nodeType === 'cargo') {
+		return `cargo-${node.cargo!.id}`;
+	}
+	return `item-${node.item!.id}`;
+}
+
+/**
+ * Get profession for a cargo node
+ */
+function getCargoProfession(cargoId: number): string {
+	return gameData.cargoToSkill.get(cargoId) || 'Gathering';
+}
+
+/**
  * Flatten material tree to aggregated list with step and profession information.
  * Includes ALL nodes (not just leaves), with step indicating crafting order.
  * Step is based on recipe structure, not current inventory state.
  */
 export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
-	const materials = new Map<number, { material: FlatMaterial; minStep: number }>();
+	const materials = new Map<string, { material: FlatMaterial; minStep: number }>();
 
 	function traverse(node: MaterialNode, isRoot: boolean = false): void {
-		// Use natural step based on recipe structure, not tree structure
-		const step = getItemNaturalStep(node.item.id);
-		const profession = getItemProfession(node.item.id);
+		const nodeKey = getMaterialKey(node);
+
+		// Determine step and profession based on node type
+		let step: number;
+		let profession: string;
+
+		if (node.nodeType === 'cargo') {
+			// Cargo is always step 1 (gathered)
+			step = 1;
+			profession = getCargoProfession(node.cargo!.id);
+		} else {
+			// Item - use existing logic
+			step = getItemNaturalStep(node.item!.id);
+			profession = getItemProfession(node.item!.id);
+		}
 
 		// Skip the root node (it's the final craft, shown separately in UI)
 		if (!isRoot) {
-			const existing = materials.get(node.item.id);
+			const existing = materials.get(nodeKey);
 			if (existing) {
 				existing.material.quantity += node.quantity;
 				existing.minStep = Math.min(existing.minStep, step);
 			} else {
-				materials.set(node.item.id, {
-					material: {
-						itemId: node.item.id,
-						item: node.item,
-						quantity: node.quantity,
-						tier: node.tier,
-						step: step,
-						profession: profession
-					},
-					minStep: step
-				});
+				if (node.nodeType === 'cargo') {
+					materials.set(nodeKey, {
+						material: {
+							nodeType: 'cargo',
+							cargoId: node.cargo!.id,
+							cargo: node.cargo,
+							quantity: node.quantity,
+							tier: node.tier,
+							step: step,
+							profession: profession
+						},
+						minStep: step
+					});
+				} else {
+					materials.set(nodeKey, {
+						material: {
+							nodeType: 'item',
+							itemId: node.item!.id,
+							item: node.item,
+							quantity: node.quantity,
+							tier: node.tier,
+							step: step,
+							profession: profession
+						},
+						minStep: step
+					});
+				}
 			}
 		}
 
@@ -727,15 +1030,22 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
  *   Total: 2 crafts (but we only need ceil(4/10) = 1 craft)
  *
  * This function recalculates from the top down using aggregated demands.
+ * Only applies to items (not cargo), as cargo doesn't have recipes.
  */
 function optimizeBatchQuantities(
-	flatMaterials: Map<number, FlatMaterial>,
-	listItems: CraftingListItem[]
+	flatMaterials: Map<string, FlatMaterial>,
+	itemEntries: ItemListEntry[]
 ): void {
-	// Collect all item IDs we need to process (materials + list items as roots)
-	const allItemIds = new Set<number>(flatMaterials.keys());
-	for (const li of listItems) {
-		allItemIds.add(li.itemId);
+	// Extract item IDs from materials that are items (not cargo)
+	const allItemIds = new Set<number>();
+	for (const [key, mat] of flatMaterials) {
+		if (mat.nodeType === 'item' && mat.itemId !== undefined) {
+			allItemIds.add(mat.itemId);
+		}
+	}
+	// Add root item IDs from list entries
+	for (const entry of itemEntries) {
+		allItemIds.add(entry.itemId);
 	}
 
 	// Get recipe for each item (using same logic as tree building)
@@ -770,8 +1080,8 @@ function optimizeBatchQuantities(
 	const correctDemands = new Map<number, number>();
 
 	// Initialize with list item demands (the roots)
-	for (const li of listItems) {
-		correctDemands.set(li.itemId, (correctDemands.get(li.itemId) || 0) + li.quantity);
+	for (const entry of itemEntries) {
+		correctDemands.set(entry.itemId, (correctDemands.get(entry.itemId) || 0) + entry.quantity);
 	}
 
 	// Process items by step (highest step first = finished products first, raw materials last)
@@ -794,18 +1104,20 @@ function optimizeBatchQuantities(
 		// Calculate optimal craft count from aggregated demand
 		const craftCount = Math.ceil(demand / recipe.outputQuantity);
 
-		// Add ingredient demands
+		// Add ingredient demands (only for item ingredients, not cargo)
 		for (const ing of recipe.ingredients) {
 			const ingDemand = craftCount * ing.quantity;
 			correctDemands.set(ing.itemId, (correctDemands.get(ing.itemId) || 0) + ingDemand);
 		}
 	}
 
-	// Update flatMaterials with correct quantities
-	for (const [itemId, mat] of flatMaterials) {
-		const correct = correctDemands.get(itemId);
-		if (correct !== undefined) {
-			mat.quantity = correct;
+	// Update flatMaterials with correct quantities (only items)
+	for (const [key, mat] of flatMaterials) {
+		if (mat.nodeType === 'item' && mat.itemId !== undefined) {
+			const correct = correctDemands.get(mat.itemId);
+			if (correct !== undefined) {
+				mat.quantity = correct;
+			}
 		}
 	}
 }
@@ -816,109 +1128,154 @@ function optimizeBatchQuantities(
  * @param listId - The list to calculate for
  * @param manualOverrides - Optional map of itemId -> quantity for manual "have" amounts
  * @param checkedOff - Optional set of itemIds that are manually marked complete
+ * @param recipePreferences - Optional map of recipe preferences for items in tree
  */
 export async function calculateListRequirements(
 	listId: string,
 	manualOverrides?: Map<number, number>,
-	checkedOff?: Set<number>
+	checkedOff?: Set<number>,
+	recipePreferences?: Map<string, number>
 ): Promise<MaterialRequirement[]> {
 	const list = crafting.lists.find((l) => l.id === listId);
-	if (!list || list.items.length === 0) return [];
+	if (!list || list.entries.length === 0) return [];
 
-	// Get or build cached trees (full trees, no inventory reduction)
-	const trees = await getListTrees(list);
+	// Get or build cached trees (full trees, no inventory reduction) with recipe preferences
+	const trees = await getListTrees(list, recipePreferences);
 	if (trees.length === 0) return [];
 
-	// Build "have" map: merge inventory with manual overrides (manual takes precedence)
-	const baseInventory = getAggregatedInventoryForSources(list.enabledSourceIds);
-	const have = new Map<number, number>();
+	// Build "have" maps: merge inventory with manual overrides (manual takes precedence)
+	const baseItemInventory = getAggregatedInventoryForSources(list.enabledSourceIds);
+	const baseCargoInventory = getAggregatedCargoForSources(list.enabledSourceIds);
 
-	for (const [itemId, agg] of baseInventory) {
+	const haveItems = new Map<number, number>();
+	for (const [itemId, agg] of baseItemInventory) {
 		const manualQty = manualOverrides?.get(itemId);
-		have.set(itemId, manualQty !== undefined ? manualQty : agg.totalQuantity);
+		haveItems.set(itemId, manualQty !== undefined ? manualQty : agg.totalQuantity);
 	}
 	// Add manual overrides for items not in inventory
 	if (manualOverrides) {
 		for (const [itemId, qty] of manualOverrides) {
-			if (!have.has(itemId)) {
-				have.set(itemId, qty);
+			if (!haveItems.has(itemId)) {
+				haveItems.set(itemId, qty);
 			}
 		}
+	}
+
+	const haveCargo = new Map<number, number>();
+	for (const [cargoId, agg] of baseCargoInventory) {
+		haveCargo.set(cargoId, agg.totalQuantity);
 	}
 
 	// Compute remaining needs by propagating inventory through the tree
-	const { needs, parentContributions: rawContributions } = computeRemainingNeeds(trees, have, checkedOff);
+	const { needs, parentContributions: rawContributions } = computeRemainingNeeds(trees, haveItems, haveCargo, checkedOff);
 
 	// Track root contributions for each material (DEV only)
-	const rootContributions = new Map<number, RootItemContribution[]>();
+	const rootContributions = new Map<string, RootItemContribution[]>();
+
+	// Helper to get material key
+	function getMaterialKey(mat: FlatMaterial): string {
+		if (mat.nodeType === 'cargo') {
+			return `cargo-${mat.cargoId}`;
+		}
+		return `item-${mat.itemId}`;
+	}
 
 	// Flatten trees to get base info (step, item details)
-	const flatMaterials = new Map<number, FlatMaterial>();
+	const flatMaterials = new Map<string, FlatMaterial>();
 	for (let i = 0; i < trees.length; i++) {
 		const tree = trees[i];
-		const listItem = list.items[i];
-		const rootItem = getItemById(listItem.itemId);
+		const entry = list.entries[i];
+
+		// Get root name for contributions
+		let rootName: string;
+		let rootId: number;
+		if (isItemEntry(entry)) {
+			const rootItem = getItemById(entry.itemId);
+			rootName = rootItem?.name || `Item #${entry.itemId}`;
+			rootId = entry.itemId;
+		} else {
+			const rootCargo = getCargoById(entry.cargoId);
+			rootName = rootCargo?.name || `Cargo #${entry.cargoId}`;
+			rootId = entry.cargoId;
+		}
 
 		const flattened = flattenMaterialTree(tree);
 		for (const mat of flattened) {
+			const matKey = getMaterialKey(mat);
+
 			// Track root contribution (for DEV debugging)
 			if (import.meta.env.DEV) {
-				const contributions = rootContributions.get(mat.itemId) || [];
+				const contributions = rootContributions.get(matKey) || [];
 				contributions.push({
-					rootItemId: listItem.itemId,
-					rootItemName: rootItem?.name || `Item #${listItem.itemId}`,
-					quantity: listItem.quantity,
+					rootItemId: rootId,
+					rootItemName: rootName,
+					quantity: entry.quantity,
 					contribution: mat.quantity
 				});
-				rootContributions.set(mat.itemId, contributions);
+				rootContributions.set(matKey, contributions);
 			}
 
 			// Aggregate flat materials (existing logic)
-			const existing = flatMaterials.get(mat.itemId);
+			const existing = flatMaterials.get(matKey);
 			if (existing) {
 				existing.quantity += mat.quantity;
 			} else {
-				flatMaterials.set(mat.itemId, { ...mat });
+				flatMaterials.set(matKey, { ...mat });
 			}
 		}
 	}
 
-	// Optimize quantities for batch recipes (fixes over-counting when multiple branches need same item)
-	optimizeBatchQuantities(flatMaterials, list.items);
+	// Optimize quantities for batch recipes (only for items, not cargo)
+	const itemEntries = list.entries.filter(isItemEntry);
+	optimizeBatchQuantities(flatMaterials, itemEntries);
 
-	// Aggregate parent contributions by parent item ID
-	function aggregateContributions(itemId: number): ParentContribution[] | undefined {
-		const contributions = rawContributions.get(itemId);
+	// Aggregate parent contributions by parent node key
+	// Only works for items (parent contributions track item inventory, not cargo)
+	function aggregateContributions(materialKey: string): ParentContribution[] | undefined {
+		const contributions = rawContributions.get(materialKey);
 		if (!contributions || contributions.length === 0) return undefined;
 
-		// Aggregate by parent item ID
-		const byParent = new Map<number, { parentQuantityUsed: number; coverage: number }>();
+		// Aggregate by parent node key, then extract item IDs for items only
+		const byParent = new Map<string, { parentQuantityUsed: number; coverage: number }>();
 		for (const c of contributions) {
-			const existing = byParent.get(c.parentItemId);
+			const existing = byParent.get(c.parentNodeKey);
 			if (existing) {
 				// Take max of parentQuantityUsed (same inventory used), sum coverage
 				existing.parentQuantityUsed = Math.max(existing.parentQuantityUsed, c.parentQuantityUsed);
 				existing.coverage += c.coverage;
 			} else {
-				byParent.set(c.parentItemId, {
+				byParent.set(c.parentNodeKey, {
 					parentQuantityUsed: c.parentQuantityUsed,
 					coverage: c.coverage
 				});
 			}
 		}
 
-		return Array.from(byParent.entries()).map(([parentItemId, data]) => ({
-			parentItemId,
-			parentQuantityUsed: data.parentQuantityUsed,
-			coverage: data.coverage
-		}));
+		// Convert to ParentContribution[] - only include item parents (not cargo)
+		const result: ParentContribution[] = [];
+		for (const [parentKey, data] of byParent) {
+			// Parse parent key to get item ID (only for items, format: "item-123")
+			if (parentKey.startsWith('item-')) {
+				const parentItemId = parseInt(parentKey.substring(5), 10);
+				if (!isNaN(parentItemId)) {
+					result.push({
+						parentItemId,
+						parentQuantityUsed: data.parentQuantityUsed,
+						coverage: data.coverage
+					});
+				}
+			}
+			// Skip cargo parents as they don't have inventory tracking
+		}
+
+		return result.length > 0 ? result : undefined;
 	}
 
 	// Build final requirements
 	const result: MaterialRequirement[] = [];
 
-	for (const [itemId, flatMat] of flatMaterials) {
-		const need = needs.get(itemId);
+	for (const [materialKey, flatMat] of flatMaterials) {
+		const need = needs.get(materialKey);
 		const baseRequired = flatMat.quantity;
 		// Cap remaining at baseRequired since we optimized quantities after tree traversal
 		// The tree may have over-counted, so remaining from tree could exceed optimized baseRequired
@@ -935,8 +1292,8 @@ export async function calculateListRequirements(
 			remaining, // After propagation (what you still need)
 			have: effectiveHave, // Effective amount covered (including propagation)
 			isComplete: remaining === 0,
-			parentContributions: aggregateContributions(itemId),
-			rootContributions: import.meta.env.DEV ? rootContributions.get(itemId) : undefined
+			parentContributions: aggregateContributions(materialKey),
+			rootContributions: import.meta.env.DEV ? rootContributions.get(materialKey) : undefined
 		});
 	}
 

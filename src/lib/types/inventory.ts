@@ -26,11 +26,25 @@ export interface SourcedItem {
 	sourceId: string; // Reference to InventorySource.id
 }
 
+// Cargo in a specific source
+export interface SourcedCargo {
+	cargoId: number;
+	quantity: number;
+	sourceId: string; // Reference to InventorySource.id
+}
+
 // Aggregated item with source breakdown
 export interface AggregatedItem {
 	itemId: number;
 	totalQuantity: number;
 	sources: SourcedItem[]; // Breakdown by source
+}
+
+// Aggregated cargo with source breakdown
+export interface AggregatedCargo {
+	cargoId: number;
+	totalQuantity: number;
+	sources: SourcedCargo[]; // Breakdown by source
 }
 
 // Allocation entry showing where to get materials

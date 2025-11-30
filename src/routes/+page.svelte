@@ -107,7 +107,7 @@
 					>
 						<div class="flex items-center justify-between">
 							<span class="font-medium text-white">{list.name}</span>
-							<span class="text-sm text-gray-400">{list.items.length} items</span>
+							<span class="text-sm text-gray-400">{list.entries.length} items</span>
 						</div>
 						{#if list.description}
 							<p class="mt-1 text-sm text-gray-400">{list.description}</p>

@@ -6,7 +6,9 @@
 import type {
 	InventorySource,
 	SourcedItem,
+	SourcedCargo,
 	AggregatedItem,
+	AggregatedCargo,
 	MaterialAllocation,
 	AllocationEntry
 } from '$lib/types/inventory';
@@ -15,7 +17,9 @@ import {
 	saveSources,
 	saveSource,
 	saveSourceItems,
+	saveSourceCargos,
 	getAllCachedInventoryItems,
+	getAllCachedInventoryCargos,
 	deleteSource as deleteCachedSource
 } from '$lib/services/cache';
 import {
@@ -38,6 +42,7 @@ function toPlain<T>(obj: T): T {
 export const inventory = $state({
 	sources: [] as InventorySource[],
 	items: new Map<string, SourcedItem[]>(), // sourceId -> items
+	cargos: new Map<string, SourcedCargo[]>(), // sourceId -> cargos
 	isLoading: false,
 	isSyncing: false,
 	lastSync: null as number | null,
@@ -125,6 +130,44 @@ export const aggregatedInventory = {
 	}
 };
 
+// Getter: aggregated cargo from enabled sources
+export const aggregatedCargo = {
+	get value() {
+		const cargoMap = new Map<number, AggregatedCargo>();
+		const enabled = getEnabledSources();
+
+		for (const source of enabled) {
+			const sourceCargos = inventory.cargos.get(source.id) || [];
+
+			for (const cargo of sourceCargos) {
+				const existing = cargoMap.get(cargo.cargoId);
+
+				if (existing) {
+					existing.totalQuantity += cargo.quantity;
+					existing.sources.push(cargo);
+				} else {
+					cargoMap.set(cargo.cargoId, {
+						cargoId: cargo.cargoId,
+						totalQuantity: cargo.quantity,
+						sources: [{ ...cargo }]
+					});
+				}
+			}
+		}
+
+		return cargoMap;
+	},
+	get size() {
+		return this.value.size;
+	},
+	get(cargoId: number) {
+		return this.value.get(cargoId);
+	},
+	values() {
+		return this.value.values();
+	}
+};
+
 /**
  * Initialize inventory from cache
  */
@@ -146,6 +189,19 @@ export async function initializeInventory(): Promise<void> {
 				existing.push(item);
 			} else {
 				inventory.items.set(item.sourceId, [item]);
+			}
+		}
+
+		// Load cargos for each source
+		const allCargos = await getAllCachedInventoryCargos();
+		inventory.cargos.clear();
+
+		for (const cargo of allCargos) {
+			const existing = inventory.cargos.get(cargo.sourceId);
+			if (existing) {
+				existing.push(cargo);
+			} else {
+				inventory.cargos.set(cargo.sourceId, [cargo]);
 			}
 		}
 	} catch (e) {
@@ -233,6 +289,40 @@ export function getAggregatedInventoryForSources(sourceIds: string[]): Map<numbe
 }
 
 /**
+ * Get aggregated cargo filtered by specific source IDs
+ * Used for per-list cargo inventory filtering
+ */
+export function getAggregatedCargoForSources(sourceIds: string[]): Map<number, AggregatedCargo> {
+	const cargoMap = new Map<number, AggregatedCargo>();
+
+	// If no sourceIds specified, use all enabled sources
+	const sourcesToUse = sourceIds.length > 0
+		? inventory.sources.filter(s => sourceIds.includes(s.id))
+		: getEnabledSources();
+
+	for (const source of sourcesToUse) {
+		const sourceCargos = inventory.cargos.get(source.id) || [];
+
+		for (const cargo of sourceCargos) {
+			const existing = cargoMap.get(cargo.cargoId);
+
+			if (existing) {
+				existing.totalQuantity += cargo.quantity;
+				existing.sources.push(cargo);
+			} else {
+				cargoMap.set(cargo.cargoId, {
+					cargoId: cargo.cargoId,
+					totalQuantity: cargo.quantity,
+					sources: [{ ...cargo }]
+				});
+			}
+		}
+	}
+
+	return cargoMap;
+}
+
+/**
  * Allocate materials from specific inventory sources
  * Used for per-list material allocation
  */
@@ -298,7 +388,7 @@ export function allocateMaterialsFromSources(
 async function syncPlayerInventory(playerId: string): Promise<void> {
 	try {
 		const response = await fetchPlayerInventory(playerId);
-		const { sources, items } = parsePlayerInventory(response.inventories || [], playerId);
+		const { sources, items, cargos } = parsePlayerInventory(response.inventories || [], playerId);
 
 		// Merge sources (preserve enabled state)
 		for (const newSource of sources) {
@@ -314,6 +404,8 @@ async function syncPlayerInventory(playerId: string): Promise<void> {
 
 			// Update items
 			inventory.items.set(newSource.id, items.filter((i) => i.sourceId === newSource.id));
+			// Update cargos
+			inventory.cargos.set(newSource.id, cargos.filter((c) => c.sourceId === newSource.id));
 		}
 
 		// Persist to cache
@@ -321,6 +413,8 @@ async function syncPlayerInventory(playerId: string): Promise<void> {
 		for (const source of sources) {
 			const sourceItems = items.filter((i) => i.sourceId === source.id);
 			await saveSourceItems(source.id, sourceItems);
+			const sourceCargos = cargos.filter((c) => c.sourceId === source.id);
+			await saveSourceCargos(source.id, sourceCargos);
 		}
 	} catch (e) {
 		console.error(`Failed to sync player inventory for ${playerId}:`, e);
@@ -342,9 +436,10 @@ async function syncClaimInventory(claimId: string): Promise<void> {
 
 		const newSources: InventorySource[] = [];
 		const newItems: SourcedItem[] = [];
+		const newCargos: SourcedCargo[] = [];
 
 		for (const building of response.buildings) {
-			const { source, items } = parseBuildingInventory(building, claimId, claimName);
+			const { source, items, cargos } = parseBuildingInventory(building, claimId, claimName);
 
 			// Check if source already exists and preserve enabled state
 			const existingSource = inventory.sources.find((s) => s.id === source.id);
@@ -354,6 +449,7 @@ async function syncClaimInventory(claimId: string): Promise<void> {
 
 			newSources.push(source);
 			newItems.push(...items);
+			newCargos.push(...cargos);
 		}
 
 		// Update state
@@ -370,6 +466,10 @@ async function syncClaimInventory(claimId: string): Promise<void> {
 				source.id,
 				newItems.filter((i) => i.sourceId === source.id)
 			);
+			inventory.cargos.set(
+				source.id,
+				newCargos.filter((c) => c.sourceId === source.id)
+			);
 		}
 
 		// Persist to cache
@@ -377,6 +477,8 @@ async function syncClaimInventory(claimId: string): Promise<void> {
 		for (const source of newSources) {
 			const sourceItems = newItems.filter((i) => i.sourceId === source.id);
 			await saveSourceItems(source.id, sourceItems);
+			const sourceCargos = newCargos.filter((c) => c.sourceId === source.id);
+			await saveSourceCargos(source.id, sourceCargos);
 		}
 	} catch (e) {
 		console.error(`Failed to sync claim inventory for ${claimId}:`, e);
@@ -429,11 +531,12 @@ export async function toggleClaimSources(claimId: string, enabled: boolean): Pro
 }
 
 /**
- * Remove a source and its items
+ * Remove a source and its items/cargos
  */
 export async function removeSource(sourceId: string): Promise<void> {
 	inventory.sources = inventory.sources.filter((s) => s.id !== sourceId);
 	inventory.items.delete(sourceId);
+	inventory.cargos.delete(sourceId);
 	await deleteCachedSource(sourceId);
 }
 
@@ -450,6 +553,22 @@ export function getItemQuantity(itemId: number): number {
  */
 export function getItemSources(itemId: number): SourcedItem[] {
 	const aggregated = aggregatedInventory.get(itemId);
+	return aggregated?.sources || [];
+}
+
+/**
+ * Get quantity of a cargo from enabled sources
+ */
+export function getCargoQuantity(cargoId: number): number {
+	const aggregated = aggregatedCargo.get(cargoId);
+	return aggregated?.totalQuantity || 0;
+}
+
+/**
+ * Get source breakdown for a cargo
+ */
+export function getCargoSources(cargoId: number): SourcedCargo[] {
+	const aggregated = aggregatedCargo.get(cargoId);
 	return aggregated?.sources || [];
 }
 

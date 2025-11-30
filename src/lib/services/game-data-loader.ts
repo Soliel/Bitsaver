@@ -4,18 +4,20 @@
  */
 
 // Bump this version when data loading logic changes to force cache refresh
-export const DATA_LOADER_VERSION = 10;
+export const DATA_LOADER_VERSION = 12;
 
 import type {
 	Item,
 	Recipe,
 	RecipeIngredient,
+	CargoIngredient,
 	LevelRequirement,
 	ToolRequirement,
 	SkillInfo,
 	ToolTypeInfo,
 	BuildingTypeInfo,
-	MaterialCostsData
+	MaterialCostsData,
+	Cargo
 } from '$lib/types/game';
 
 // Manifest structure
@@ -120,7 +122,12 @@ interface RawResource {
 interface RawCargo {
 	id: number;
 	name: string;
+	description: string;
+	icon_asset_name: string;
+	tier: number;
 	tag: string;
+	rarity: string;
+	volume: number;
 }
 
 interface RawItemList {
@@ -209,6 +216,7 @@ async function fetchMaterialCosts(): Promise<MaterialCostsData | null> {
  */
 export async function loadAllGameData(): Promise<{
 	items: Map<number, Item>;
+	cargos: Map<number, Cargo>;
 	recipes: Map<number, Recipe[]>;
 	extractionRecipes: Map<number, Recipe[]>;
 	cargoToSkill: Map<number, string>;
@@ -241,8 +249,13 @@ export async function loadAllGameData(): Promise<{
 	// Parse items
 	const items = parseItems(rawItems);
 
+	// Parse cargo items
+	const cargos = parseCargos(rawCargos);
+
 	// Parse recipes with reference data for enrichment
-	const recipes = parseRecipes(rawRecipes, skills, toolTypes, buildingTypes);
+	// Pass rawCargos to filter out cyclic pack/unpack recipes
+	// Pass rawItems and rawItemLists to resolve "Output" items to real items
+	const recipes = parseRecipes(rawRecipes, skills, toolTypes, buildingTypes, rawCargos, rawItems, rawItemLists);
 
 	// Parse extraction recipes
 	const extractionRecipes = parseExtractionRecipes(rawExtractionRecipes, skills, toolTypes);
@@ -263,7 +276,7 @@ export async function loadAllGameData(): Promise<{
 		mergeMaterialCosts(items, recipes, materialCosts);
 	}
 
-	return { items, recipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, skills, toolTypes, buildingTypes };
+	return { items, cargos, recipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, skills, toolTypes, buildingTypes };
 }
 
 /**
@@ -324,15 +337,60 @@ function parseItems(rawItems: RawItem[]): Map<number, Item> {
 }
 
 /**
+ * Parse cargo items from raw JSON
+ */
+function parseCargos(rawCargos: RawCargo[]): Map<number, Cargo> {
+	const cargos = new Map<number, Cargo>();
+
+	for (const raw of rawCargos) {
+		const cargo: Cargo = {
+			id: raw.id,
+			name: raw.name,
+			description: raw.description || '',
+			iconAssetName: raw.icon_asset_name || '',
+			tier: raw.tier,
+			tag: raw.tag || '',
+			rarity: raw.rarity || 'Common',
+			volume: raw.volume || 0
+		};
+		cargos.set(cargo.id, cargo);
+	}
+
+	return cargos;
+}
+
+/**
  * Parse recipes from raw JSON, grouped by output item ID
+ * Also resolves "Output" items (items with item_list_id) to their real item list contents
  */
 function parseRecipes(
 	rawRecipes: RawRecipe[],
 	skills: Map<number, SkillInfo>,
 	toolTypes: Map<number, ToolTypeInfo>,
-	buildingTypes: Map<number, BuildingTypeInfo>
+	buildingTypes: Map<number, BuildingTypeInfo>,
+	rawCargos: RawCargo[],
+	rawItems: RawItem[],
+	rawItemLists: RawItemList[]
 ): Map<number, Recipe[]> {
 	const recipesByItem = new Map<number, Recipe[]>();
+
+	// Build cargo lookup for filtering pack/unpack recipes
+	const cargoById = new Map<number, RawCargo>();
+	for (const c of rawCargos) {
+		cargoById.set(c.id, c);
+	}
+
+	// Build item lookup to check for item_list_id
+	const rawItemById = new Map<number, RawItem & { item_list_id?: number }>();
+	for (const item of rawItems) {
+		rawItemById.set(item.id, item as RawItem & { item_list_id?: number });
+	}
+
+	// Build item list lookup
+	const itemListById = new Map<number, RawItemList>();
+	for (const list of rawItemLists) {
+		itemListById.set(list.id, list);
+	}
 
 	for (const raw of rawRecipes) {
 		// Skip recipes with no output
@@ -356,13 +414,33 @@ function parseRecipes(
 			continue;
 		}
 
-		// Parse ingredients (only Item type - exclude Resources, Cargo, etc.)
+		// Parse item ingredients
 		const ingredients: RecipeIngredient[] = (raw.consumed_item_stacks || [])
 			.filter((s) => s.item_type === 'Item')
 			.map((s) => ({
 				itemId: s.item_id,
 				quantity: s.quantity
 			}));
+
+		// Parse cargo ingredients (previously excluded, now tracked)
+		const cargoIngredients: CargoIngredient[] = (raw.consumed_item_stacks || [])
+			.filter((s) => s.item_type === 'Cargo')
+			.map((s) => ({
+				cargoId: s.item_id,
+				quantity: s.quantity
+			}));
+
+		// Skip "unpack" recipes - recipes where all cargo ingredients are Package type
+		// These create cycles: Item → Package (cargo) → Item (same item)
+		if (cargoIngredients.length > 0) {
+			const allPackages = cargoIngredients.every((ci) => {
+				const cargo = cargoById.get(ci.cargoId);
+				return cargo?.tag === 'Package';
+			});
+			if (allPackages) {
+				continue;
+			}
+		}
 
 		// Parse level requirements with skill names
 		const levelRequirements: LevelRequirement[] = (raw.level_requirements || []).map((lr) => {
@@ -402,6 +480,7 @@ function parseRecipes(
 			craftingStationName: buildingType?.name,
 			craftingStationTier: raw.building_requirement?.tier,
 			ingredients,
+			cargoIngredients: cargoIngredients.length > 0 ? cargoIngredients : undefined,
 			levelRequirements,
 			toolRequirements
 		};
@@ -410,6 +489,45 @@ function parseRecipes(
 		const existing = recipesByItem.get(recipe.outputItemId) || [];
 		existing.push(recipe);
 		recipesByItem.set(recipe.outputItemId, existing);
+
+		// If the output item is an "Output" item (has item_list_id), also register this recipe
+		// for each real item in the item list. This allows us to trace from real items back to cargo.
+		const outputItem = rawItemById.get(recipe.outputItemId);
+		if (outputItem?.item_list_id) {
+			const itemList = itemListById.get(outputItem.item_list_id);
+			if (itemList) {
+				// Get all unique items from the item list
+				const realItemIds = new Set<number>();
+				const itemQuantities = new Map<number, number>(); // item_id -> total quantity
+
+				for (const poss of itemList.possibilities) {
+					for (const itemStack of poss.items) {
+						if (itemStack.item_type === 'Item') {
+							realItemIds.add(itemStack.item_id);
+							// Track max quantity for this item across all possibilities
+							const currentMax = itemQuantities.get(itemStack.item_id) || 0;
+							if (itemStack.quantity > currentMax) {
+								itemQuantities.set(itemStack.item_id, itemStack.quantity);
+							}
+						}
+					}
+				}
+
+				// Create a recipe variant for each real item
+				for (const realItemId of realItemIds) {
+					const realQuantity = itemQuantities.get(realItemId) || 1;
+					const resolvedRecipe: Recipe = {
+						...recipe,
+						outputItemId: realItemId,
+						outputQuantity: realQuantity * recipe.outputQuantity
+					};
+
+					const existingResolved = recipesByItem.get(realItemId) || [];
+					existingResolved.push(resolvedRecipe);
+					recipesByItem.set(realItemId, existingResolved);
+				}
+			}
+		}
 	}
 
 	return recipesByItem;

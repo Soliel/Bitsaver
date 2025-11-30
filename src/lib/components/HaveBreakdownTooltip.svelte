@@ -1,11 +1,12 @@
 <script lang="ts">
-	import { inventory, getAggregatedInventoryForSources } from '$lib/state/inventory.svelte';
+	import { inventory, getAggregatedInventoryForSources, getAggregatedCargoForSources } from '$lib/state/inventory.svelte';
 	import { getItemById } from '$lib/state/game-data.svelte';
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import type { ParentContribution } from '$lib/types/app';
 
 	interface Props {
-		itemId: number;
+		itemId?: number; // Optional - not present for cargo
+		cargoId?: number; // Optional - for cargo items
 		listSourceIds: string[]; // The list's enabled source IDs
 		manualAmount: number | undefined; // Manual override if set
 		isCheckedOff: boolean;
@@ -13,34 +14,63 @@
 		children: import('svelte').Snippet;
 	}
 
-	let { itemId, listSourceIds, manualAmount, isCheckedOff, parentContributions, children }: Props = $props();
+	let { itemId, cargoId, listSourceIds, manualAmount, isCheckedOff, parentContributions, children }: Props = $props();
 
 	let showPopover = $state(false);
+	let isHovering = $state(false);
+	let shiftHeld = $state(false);
 	let triggerEl = $state<HTMLDivElement | null>(null);
 	let popoverStyle = $state('');
 
-	// Get source breakdown for this item (aggregated by source)
-	const breakdown = $derived.by(() => {
-		const aggregated = getAggregatedInventoryForSources(listSourceIds);
-		const itemAgg = aggregated.get(itemId);
-		if (!itemAgg) return [];
+	// Determine if this is for cargo or item
+	const isCargo = $derived(cargoId !== undefined);
 
+	// Get source breakdown for this item or cargo (aggregated by source)
+	const breakdown = $derived.by(() => {
 		// Aggregate by sourceId in case same source has multiple entries
 		const bySource = new Map<string, { id: string; name: string; claimName?: string; quantity: number }>();
 
-		for (const source of itemAgg.sources) {
-			const sourceInfo = inventory.sources.find((s) => s.id === source.sourceId);
-			const existing = bySource.get(source.sourceId);
+		if (cargoId !== undefined) {
+			// Handle cargo
+			const aggregated = getAggregatedCargoForSources(listSourceIds);
+			const cargoAgg = aggregated.get(cargoId);
+			if (!cargoAgg) return [];
 
-			if (existing) {
-				existing.quantity += source.quantity;
-			} else {
-				bySource.set(source.sourceId, {
-					id: source.sourceId,
-					name: sourceInfo?.nickname || sourceInfo?.name || source.sourceId,
-					claimName: sourceInfo?.claimName,
-					quantity: source.quantity
-				});
+			for (const source of cargoAgg.sources) {
+				const sourceInfo = inventory.sources.find((s) => s.id === source.sourceId);
+				const existing = bySource.get(source.sourceId);
+
+				if (existing) {
+					existing.quantity += source.quantity;
+				} else {
+					bySource.set(source.sourceId, {
+						id: source.sourceId,
+						name: sourceInfo?.nickname || sourceInfo?.name || source.sourceId,
+						claimName: sourceInfo?.claimName,
+						quantity: source.quantity
+					});
+				}
+			}
+		} else if (itemId !== undefined) {
+			// Handle item
+			const aggregated = getAggregatedInventoryForSources(listSourceIds);
+			const itemAgg = aggregated.get(itemId);
+			if (!itemAgg) return [];
+
+			for (const source of itemAgg.sources) {
+				const sourceInfo = inventory.sources.find((s) => s.id === source.sourceId);
+				const existing = bySource.get(source.sourceId);
+
+				if (existing) {
+					existing.quantity += source.quantity;
+				} else {
+					bySource.set(source.sourceId, {
+						id: source.sourceId,
+						name: sourceInfo?.nickname || sourceInfo?.name || source.sourceId,
+						claimName: sourceInfo?.claimName,
+						quantity: source.quantity
+					});
+				}
 			}
 		}
 
@@ -85,17 +115,42 @@
 		popoverStyle = `left: ${left}px; bottom: ${window.innerHeight - top}px;`;
 	}
 
-	function handleMouseEnter() {
-		if (hasContent) {
+	function updatePopoverVisibility() {
+		// Show popover only when hovering AND shift is NOT held (in DEV, shift shows the other popover)
+		if (hasContent && isHovering && !shiftHeld) {
 			updatePosition();
 			showPopover = true;
+		} else {
+			showPopover = false;
 		}
 	}
 
+	function handleMouseEnter() {
+		isHovering = true;
+		updatePopoverVisibility();
+	}
+
 	function handleMouseLeave() {
+		isHovering = false;
 		showPopover = false;
 	}
+
+	function handleKeyDown(e: KeyboardEvent) {
+		if (e.key === 'Shift') {
+			shiftHeld = true;
+			updatePopoverVisibility();
+		}
+	}
+
+	function handleKeyUp(e: KeyboardEvent) {
+		if (e.key === 'Shift') {
+			shiftHeld = false;
+			updatePopoverVisibility();
+		}
+	}
 </script>
+
+<svelte:window onkeydown={handleKeyDown} onkeyup={handleKeyUp} />
 
 <div
 	bind:this={triggerEl}
@@ -112,7 +167,7 @@
 		class="fixed z-[9999] w-60 rounded-lg bg-gray-900 border border-gray-600 shadow-xl p-3"
 		style={popoverStyle}
 	>
-		<div class="text-xs text-gray-400 mb-2 font-medium">Item Sources</div>
+		<div class="text-xs text-gray-400 mb-2 font-medium">{isCargo ? 'Cargo Sources' : 'Item Sources'}</div>
 
 		{#if isCheckedOff}
 			<div class="flex items-center gap-2 text-sm text-green-400 mb-2">

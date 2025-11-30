@@ -3,13 +3,13 @@
  */
 
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { Item, ItemWithRecipes, Building, Recipe } from '$lib/types/game';
-import type { InventorySource, SourcedItem } from '$lib/types/inventory';
+import type { Item, ItemWithRecipes, Building, Recipe, Cargo } from '$lib/types/game';
+import type { InventorySource, SourcedItem, SourcedCargo } from '$lib/types/inventory';
 import type { CraftingList, CacheMetadata, ListProgress } from '$lib/types/app';
 
 // Database schema version
 const DB_NAME = 'bitsaver';
-const DB_VERSION = 4; // Incremented for list progress store
+const DB_VERSION = 6; // Incremented for inventoryCargos store
 
 // Cache TTL constants (in milliseconds)
 export const CACHE_TTL = {
@@ -40,6 +40,14 @@ interface BithelperDB extends DBSchema {
 		indexes: {
 			'by-tier': number;
 			'by-name': string;
+			'by-tag': string;
+		};
+	};
+	cargos: {
+		key: number;
+		value: Cargo;
+		indexes: {
+			'by-tier': number;
 			'by-tag': string;
 		};
 	};
@@ -82,6 +90,14 @@ interface BithelperDB extends DBSchema {
 			'by-item': number;
 		};
 	};
+	inventoryCargos: {
+		key: [string, number]; // Composite key: [sourceId, cargoId]
+		value: SourcedCargo;
+		indexes: {
+			'by-source': string;
+			'by-cargo': number;
+		};
+	};
 	craftingLists: {
 		key: string;
 		value: CraftingList;
@@ -119,6 +135,13 @@ export async function getDB(): Promise<IDBPDatabase<BithelperDB>> {
 				itemStore.createIndex('by-tier', 'tier');
 				itemStore.createIndex('by-name', 'name');
 				itemStore.createIndex('by-tag', 'tag');
+			}
+
+			// Cargos store (new in v5)
+			if (!db.objectStoreNames.contains('cargos')) {
+				const cargoStore = db.createObjectStore('cargos', { keyPath: 'id' });
+				cargoStore.createIndex('by-tier', 'tier');
+				cargoStore.createIndex('by-tag', 'tag');
 			}
 
 			// Recipes store (new in v2)
@@ -161,6 +184,15 @@ export async function getDB(): Promise<IDBPDatabase<BithelperDB>> {
 				});
 				invStore.createIndex('by-source', 'sourceId');
 				invStore.createIndex('by-item', 'itemId');
+			}
+
+			// Inventory cargos store (new in v6)
+			if (!db.objectStoreNames.contains('inventoryCargos')) {
+				const cargoStore = db.createObjectStore('inventoryCargos', {
+					keyPath: ['sourceId', 'cargoId']
+				});
+				cargoStore.createIndex('by-source', 'sourceId');
+				cargoStore.createIndex('by-cargo', 'cargoId');
 			}
 
 			// Crafting lists store
@@ -359,7 +391,7 @@ export async function saveSources(sources: InventorySource[]): Promise<void> {
 }
 
 /**
- * Delete a source and its items
+ * Delete a source and its items/cargos
  */
 export async function deleteSource(sourceId: string): Promise<void> {
 	const db = await getDB();
@@ -369,10 +401,18 @@ export async function deleteSource(sourceId: string): Promise<void> {
 
 	// Delete associated items
 	const items = await db.getAllFromIndex('inventoryItems', 'by-source', sourceId);
-	const tx = db.transaction('inventoryItems', 'readwrite');
+	const itemTx = db.transaction('inventoryItems', 'readwrite');
 	await Promise.all([
-		...items.map((item) => tx.store.delete([item.sourceId, item.itemId])),
-		tx.done
+		...items.map((item) => itemTx.store.delete([item.sourceId, item.itemId])),
+		itemTx.done
+	]);
+
+	// Delete associated cargos
+	const cargos = await db.getAllFromIndex('inventoryCargos', 'by-source', sourceId);
+	const cargoTx = db.transaction('inventoryCargos', 'readwrite');
+	await Promise.all([
+		...cargos.map((cargo) => cargoTx.store.delete([cargo.sourceId, cargo.cargoId])),
+		cargoTx.done
 	]);
 }
 
@@ -412,6 +452,45 @@ export async function saveSourceItems(sourceId: string, items: SourcedItem[]): P
 	if (items.length > 0) {
 		const addTx = db.transaction('inventoryItems', 'readwrite');
 		await Promise.all([...items.map((item) => addTx.store.put(item)), addTx.done]);
+	}
+}
+
+// ============ Inventory Cargos Cache ============
+
+/**
+ * Get all inventory cargos for a source
+ */
+export async function getCachedCargosForSource(sourceId: string): Promise<SourcedCargo[]> {
+	const db = await getDB();
+	return db.getAllFromIndex('inventoryCargos', 'by-source', sourceId);
+}
+
+/**
+ * Get all inventory cargos
+ */
+export async function getAllCachedInventoryCargos(): Promise<SourcedCargo[]> {
+	const db = await getDB();
+	return db.getAll('inventoryCargos');
+}
+
+/**
+ * Save inventory cargos for a source (replaces existing)
+ */
+export async function saveSourceCargos(sourceId: string, cargos: SourcedCargo[]): Promise<void> {
+	const db = await getDB();
+
+	// Delete existing cargos for this source
+	const existingCargos = await db.getAllFromIndex('inventoryCargos', 'by-source', sourceId);
+	const deleteTx = db.transaction('inventoryCargos', 'readwrite');
+	await Promise.all([
+		...existingCargos.map((cargo) => deleteTx.store.delete([cargo.sourceId, cargo.cargoId])),
+		deleteTx.done
+	]);
+
+	// Add new cargos
+	if (cargos.length > 0) {
+		const addTx = db.transaction('inventoryCargos', 'readwrite');
+		await Promise.all([...cargos.map((cargo) => addTx.store.put(cargo)), addTx.done]);
 	}
 }
 
@@ -488,17 +567,19 @@ export async function clearAllCache(): Promise<void> {
 	await db.clear('buildings');
 	await db.clear('inventorySources');
 	await db.clear('inventoryItems');
+	await db.clear('inventoryCargos');
 	await db.clear('craftingLists');
 	await db.clear('listProgress');
 	await db.clear('metadata');
 }
 
 /**
- * Clear only game data cache (items, buildings, recipes)
+ * Clear only game data cache (items, cargos, buildings, recipes)
  */
 export async function clearGameDataCache(): Promise<void> {
 	const db = await getDB();
 	await db.clear('items');
+	await db.clear('cargos');
 	await db.clear('recipes');
 	await db.clear('extractionRecipes');
 	await db.clear('itemDetails');
@@ -599,10 +680,11 @@ export async function cacheExtractionRecipes(recipes: Map<number, Recipe[]>): Pr
 // ============ Full Game Data Cache ============
 
 /**
- * Cache all game data (items, recipes, extraction recipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill) with hash
+ * Cache all game data (items, cargos, recipes, extraction recipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill) with hash
  */
 export async function cacheAllGameData(
 	items: Map<number, Item>,
+	cargos: Map<number, Cargo>,
 	recipes: Map<number, Recipe[]>,
 	extractionRecipes: Map<number, Recipe[]>,
 	cargoToSkill: Map<number, string>,
@@ -614,6 +696,7 @@ export async function cacheAllGameData(
 
 	// Clear existing data
 	await db.clear('items');
+	await db.clear('cargos');
 	await db.clear('recipes');
 	await db.clear('extractionRecipes');
 
@@ -621,6 +704,11 @@ export async function cacheAllGameData(
 	const itemTx = db.transaction('items', 'readwrite');
 	const itemPuts = Array.from(items.values()).map((item) => itemTx.store.put(item));
 	await Promise.all([...itemPuts, itemTx.done]);
+
+	// Cache cargos
+	const cargoTx = db.transaction('cargos', 'readwrite');
+	const cargoPuts = Array.from(cargos.values()).map((cargo) => cargoTx.store.put(cargo));
+	await Promise.all([...cargoPuts, cargoTx.done]);
 
 	// Cache recipes
 	await cacheRecipes(recipes);
@@ -733,6 +821,7 @@ async function loadItemFromListToSkill(): Promise<Map<number, string>> {
  */
 export async function loadAllGameDataFromCache(): Promise<{
 	items: Map<number, Item>;
+	cargos: Map<number, Cargo>;
 	recipes: Map<number, Recipe[]>;
 	extractionRecipes: Map<number, Recipe[]>;
 	cargoToSkill: Map<number, string>;
@@ -754,11 +843,18 @@ export async function loadAllGameDataFromCache(): Promise<{
 	// If no items cached, return null
 	if (items.size === 0) return null;
 
+	// Load cargos
+	const cargos = new Map<number, Cargo>();
+	const allCargos = await db.getAll('cargos');
+	for (const cargo of allCargos) {
+		cargos.set(cargo.id, cargo);
+	}
+
 	const recipes = await getCachedRecipes();
 	const extractionRecipes = await getCachedExtractionRecipes();
 	const cargoToSkill = await loadCargoToSkill();
 	const itemToCargoSkill = await loadItemToCargoSkill();
 	const itemFromListToSkill = await loadItemFromListToSkill();
 
-	return { items, recipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill };
+	return { items, cargos, recipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill };
 }

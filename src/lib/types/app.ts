@@ -2,21 +2,48 @@
  * Application state types
  */
 
-import type { Item, FlatMaterial } from './game';
+import type { Item, FlatMaterial, Cargo } from './game';
+
+// List entry type discriminator
+export type ListEntryType = 'item' | 'cargo';
+
+// Base properties for all list entries
+interface ListEntryBase {
+	id: string; // Unique ID for this list entry
+	type: ListEntryType;
+	quantity: number;
+	addedAt: number;
+}
+
+// Item entry (most common, existing behavior)
+export interface ItemListEntry extends ListEntryBase {
+	type: 'item';
+	itemId: number;
+	recipeId?: number; // Selected recipe ID (if item has multiple recipes)
+}
+
+// Cargo entry (for direct cargo gathering goals)
+export interface CargoListEntry extends ListEntryBase {
+	type: 'cargo';
+	cargoId: number;
+}
+
+// Unified list entry type
+export type CraftingListEntry = ItemListEntry | CargoListEntry;
 
 // Crafting list
 export interface CraftingList {
 	id: string;
 	name: string;
 	description?: string;
-	items: CraftingListItem[];
+	entries: CraftingListEntry[]; // Renamed from 'items' for clarity with multiple types
 	enabledSourceIds: string[]; // Per-list inventory source selection
 	autoRefreshEnabled?: boolean; // Per-list auto-refresh toggle (undefined = true)
 	createdAt: number;
 	updatedAt: number;
 }
 
-// Item in a crafting list
+// Legacy: Item in a crafting list (for migration)
 export interface CraftingListItem {
 	id: string; // Unique ID for this list entry
 	itemId: number;
@@ -94,12 +121,24 @@ export type ListViewMode = 'step' | 'profession' | 'combined';
 // Per-list progress state (persisted separately from list data)
 export interface ListProgress {
 	listId: string; // Primary key, matches CraftingList.id
-	manualHave: [number, number][]; // Serialized Map<itemId, quantity>
-	checkedOff: number[]; // Serialized Set<itemId>
+	manualHave: [number, number][]; // Serialized Map<itemId, quantity> (legacy, items only)
+	manualHaveCargo?: [number, number][]; // Serialized Map<cargoId, quantity>
+	checkedOff: number[]; // Serialized Set<itemId> (legacy, items only)
+	checkedOffCargo?: number[]; // Serialized Set<cargoId>
+	recipePreferences?: [string, number][]; // Serialized Map<materialKey, recipeId>
 	hideCompleted: boolean;
 	viewMode: ListViewMode;
 	collapsedSections: string[]; // Serialized Set<sectionId>
 	updatedAt: number;
+}
+
+// Type guards for list entries
+export function isItemEntry(entry: CraftingListEntry): entry is ItemListEntry {
+	return entry.type === 'item';
+}
+
+export function isCargoEntry(entry: CraftingListEntry): entry is CargoListEntry {
+	return entry.type === 'cargo';
 }
 
 // Player's accessible claim info
@@ -117,6 +156,7 @@ export interface UserConfig {
 	inventoryLastSync?: number; // Timestamp of last inventory sync
 	autoRefreshMinutes: number; // Default 5, 0 = disabled
 	theme: 'light' | 'dark' | 'system';
+	stripedRows: boolean; // Alternating row colors in tables
 }
 
 // Cache metadata for staleness checking

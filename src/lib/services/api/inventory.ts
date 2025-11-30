@@ -9,7 +9,8 @@ import type {
 	PlayerInventoryEntry,
 	BuildingInventory,
 	InventorySource,
-	SourcedItem
+	SourcedItem,
+	SourcedCargo
 } from '$lib/types/inventory';
 
 /**
@@ -137,13 +138,13 @@ export async function searchPlayers(
 }
 
 /**
- * Parse building inventory into InventorySource and SourcedItems
+ * Parse building inventory into InventorySource, SourcedItems, and SourcedCargos
  */
 export function parseBuildingInventory(
 	building: BuildingInventory,
 	claimId?: string,
 	claimName?: string
-): { source: InventorySource; items: SourcedItem[] } {
+): { source: InventorySource; items: SourcedItem[]; cargos: SourcedCargo[] } {
 	const source: InventorySource = {
 		id: building.entityId,
 		type: 'claim_building',
@@ -157,34 +158,49 @@ export function parseBuildingInventory(
 	};
 
 	const items: SourcedItem[] = [];
+	const cargos: SourcedCargo[] = [];
 
 	// Handle case where inventory might not exist or be in a different format
 	const inventory = building.inventory || [];
 
 	for (const slot of inventory) {
 		if (slot?.contents && slot.contents.quantity > 0) {
-			items.push({
-				itemId: slot.contents.item_id,
-				itemType: slot.contents.item_type,
-				quantity: slot.contents.quantity,
-				sourceId: building.entityId
-			});
+			if (slot.contents.item_type === 'Cargo') {
+				cargos.push({
+					cargoId: slot.contents.item_id,
+					quantity: slot.contents.quantity,
+					sourceId: building.entityId
+				});
+			} else {
+				items.push({
+					itemId: slot.contents.item_id,
+					itemType: slot.contents.item_type,
+					quantity: slot.contents.quantity,
+					sourceId: building.entityId
+				});
+			}
 		}
 	}
 
-	return { source, items };
+	return { source, items, cargos };
 }
 
+// Item type constants for player inventory (numeric)
+// These map to the string types used in building inventory
+// 0 = Item, 1 = Cargo
+const ITEM_TYPE_CARGO = 1; // Cargo type in player inventory
+
 /**
- * Parse player inventory into InventorySource and SourcedItems
+ * Parse player inventory into InventorySource, SourcedItems, and SourcedCargos
  * Player inventory uses a different structure with pockets instead of inventory slots
  */
 export function parsePlayerInventory(
 	inventories: PlayerInventoryEntry[],
 	playerId: string
-): { sources: InventorySource[]; items: SourcedItem[] } {
+): { sources: InventorySource[]; items: SourcedItem[]; cargos: SourcedCargo[] } {
 	const sources: InventorySource[] = [];
 	const items: SourcedItem[] = [];
+	const cargos: SourcedCargo[] = [];
 
 	for (const inv of inventories) {
 		const sourceId = `player:${playerId}:${inv.entityId}`;
@@ -205,17 +221,25 @@ export function parsePlayerInventory(
 		// Parse pockets (camelCase format)
 		for (const pocket of inv.pockets || []) {
 			if (pocket?.contents && pocket.contents.quantity > 0) {
-				items.push({
-					itemId: pocket.contents.itemId,
-					itemType: String(pocket.contents.itemType),
-					quantity: pocket.contents.quantity,
-					sourceId
-				});
+				if (pocket.contents.itemType === ITEM_TYPE_CARGO) {
+					cargos.push({
+						cargoId: pocket.contents.itemId,
+						quantity: pocket.contents.quantity,
+						sourceId
+					});
+				} else {
+					items.push({
+						itemId: pocket.contents.itemId,
+						itemType: String(pocket.contents.itemType),
+						quantity: pocket.contents.quantity,
+						sourceId
+					});
+				}
 			}
 		}
 	}
 
-	return { sources, items };
+	return { sources, items, cargos };
 }
 
 /**
@@ -247,4 +271,22 @@ export function aggregateItems(items: SourcedItem[]): Map<number, SourcedItem[]>
 	}
 
 	return itemMap;
+}
+
+/**
+ * Aggregate cargo from multiple sources, combining quantities for same cargoId
+ */
+export function aggregateCargos(cargos: SourcedCargo[]): Map<number, SourcedCargo[]> {
+	const cargoMap = new Map<number, SourcedCargo[]>();
+
+	for (const cargo of cargos) {
+		const existing = cargoMap.get(cargo.cargoId);
+		if (existing) {
+			existing.push(cargo);
+		} else {
+			cargoMap.set(cargo.cargoId, [cargo]);
+		}
+	}
+
+	return cargoMap;
 }

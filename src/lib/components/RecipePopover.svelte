@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getItemById, findRecipesForItem } from '$lib/state/game-data.svelte';
+	import { getItemById, getCargoById, findRecipesForItem } from '$lib/state/game-data.svelte';
 	import { getItemIconUrl } from '$lib/utils/icons';
 
 	interface Props {
@@ -29,16 +29,19 @@
 	}
 
 	// Filter to recipes where:
-	// 1. All ingredients are valid Items (can be looked up)
-	// 2. Not a downgrade recipe (output tier >= all input tiers)
+	// 1. Has some ingredients (item or cargo)
+	// 2. All item ingredients are valid Items (can be looked up)
+	// 3. Not a downgrade recipe (output tier >= all input tiers)
 	// Then sort by cost (cheapest first)
 	const recipes = $derived(
 		allRecipes
-			.filter(r =>
-				r.ingredients.length > 0 &&
-				r.ingredients.every(ing => getItemById(ing.itemId) !== undefined) &&
-				!isDowngradeRecipe(r)
-			)
+			.filter(r => {
+				const hasItemIngredients = r.ingredients.length > 0;
+				const hasCargoIngredients = (r.cargoIngredients?.length ?? 0) > 0;
+				if (!hasItemIngredients && !hasCargoIngredients) return false;
+				if (hasItemIngredients && !r.ingredients.every(ing => getItemById(ing.itemId) !== undefined)) return false;
+				return !isDowngradeRecipe(r);
+			})
 			.sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity))
 	);
 	const hasRecipe = $derived(recipes.length > 0);
@@ -145,6 +148,25 @@
 					<span class="text-sm text-blue-400 font-medium">x{ingredient.quantity}</span>
 				</div>
 			{/each}
+			{#if recipe.cargoIngredients?.length}
+				{#each recipe.cargoIngredients as cargoIng (cargoIng.cargoId)}
+					{@const cargo = getCargoById(cargoIng.cargoId)}
+					{@const cargoIcon = cargo ? getItemIconUrl(cargo.iconAssetName) : null}
+					<div class="flex items-center gap-2">
+						<div class="flex h-6 w-6 flex-shrink-0 items-center justify-center bg-gray-800 rounded">
+							{#if cargoIcon}
+								<img src={cargoIcon} alt="" class="h-5 w-5 object-contain" />
+							{:else}
+								<span class="text-xs text-gray-500">?</span>
+							{/if}
+						</div>
+						<span class="text-sm text-gray-300 truncate flex-1">
+							{cargo?.name || `Cargo #${cargoIng.cargoId}`}
+						</span>
+						<span class="text-sm text-amber-400 font-medium">x{cargoIng.quantity}</span>
+					</div>
+				{/each}
+			{/if}
 		</div>
 
 		{#if recipes.length > 1}

@@ -31,6 +31,21 @@
 
 	// Get sources by type reactively
 	const getSourcesForType = (type: string) => sourcesByType.value.get(type as any) || [];
+
+	// Toggle all sources of a specific type
+	function toggleTypeEnabled(sourceType: string) {
+		const sources = getSourcesForType(sourceType);
+		const allEnabled = sources.every(s => s.enabled);
+
+		// Toggle: if all enabled, disable all; otherwise enable all
+		for (const source of sources) {
+			if (allEnabled) {
+				if (source.enabled) toggleSource(source.id);
+			} else {
+				if (!source.enabled) toggleSource(source.id);
+			}
+		}
+	}
 </script>
 
 <div class="space-y-6">
@@ -94,10 +109,19 @@
 		{#each ['player', 'bank', 'deployable', 'claim_building'] as sourceType}
 			{@const sources = getSourcesForType(sourceType)}
 			{#if sources.length > 0}
+				{@const allEnabled = sources.every(s => s.enabled)}
 				<div class="rounded-lg bg-gray-700 shadow">
 					<div class="border-b border-gray-600 p-4">
-						<h3 class="font-semibold text-white">{typeLabels[sourceType]}</h3>
-						<p class="text-sm text-gray-400">{sources.length} sources</p>
+						<label class="flex cursor-pointer items-center gap-2">
+							<input
+								type="checkbox"
+								checked={allEnabled}
+								onchange={() => toggleTypeEnabled(sourceType)}
+								class="h-4 w-4 rounded border-gray-500 bg-gray-800 text-blue-600 focus:ring-blue-500"
+							/>
+							<h3 class="font-semibold text-white">{typeLabels[sourceType]}</h3>
+						</label>
+						<p class="ml-6 text-sm text-gray-400">{sources.length} sources</p>
 					</div>
 
 					<div class="divide-y divide-gray-600">
@@ -113,8 +137,12 @@
 									<p class="truncate font-medium text-white">
 										{source.nickname || source.name}
 									</p>
-									{#if source.claimName}
-										<p class="text-xs text-gray-400">{source.claimName}</p>
+									{#if source.claimName || source.claimId}
+										<p class="text-xs text-gray-400">
+											{source.claimName ||
+												settings.accessibleClaims.find((c) => c.entityId === source.claimId)?.name ||
+												''}
+										</p>
 									{/if}
 								</div>
 								{#if source.lastSynced}
@@ -156,16 +184,17 @@
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-gray-600">
-						{#each Array.from(aggregatedInventory.values()).slice(0, 50) as item (item.itemId)}
+						{#each Array.from(aggregatedInventory.values()).slice(0, 50) as item, i (item.itemId)}
 							{@const itemInfo = getItemById(item.itemId)}
+							{@const stripeColor = settings.stripedRows && i % 2 === 1 ? 'rgba(31, 41, 55, 0.9)' : undefined}
 							<tr class="hover:bg-gray-600">
-								<td class="px-4 py-2">
+								<td class="px-4 py-2" style:background-color={stripeColor}>
 									<span class="font-medium text-white">{itemInfo?.name || `Item #${item.itemId}`}</span>
 								</td>
-								<td class="px-4 py-2 text-right font-mono text-gray-300">
+								<td class="px-4 py-2 text-right font-mono text-gray-300" style:background-color={stripeColor}>
 									{item.totalQuantity.toLocaleString()}
 								</td>
-								<td class="px-4 py-2 text-right text-sm text-gray-400">
+								<td class="px-4 py-2 text-right text-sm text-gray-400" style:background-color={stripeColor}>
 									{item.sources.length} source{item.sources.length !== 1 ? 's' : ''}
 								</td>
 							</tr>

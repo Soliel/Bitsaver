@@ -101,7 +101,7 @@
 						</div>
 
 						<div class="mt-4 flex items-center justify-between text-sm text-gray-400">
-							<span>{list.items.length} items</span>
+							<span>{list.entries.length} items</span>
 							<span>Updated {formatDate(list.updatedAt)}</span>
 						</div>
 					</div>

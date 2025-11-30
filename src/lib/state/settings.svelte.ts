@@ -15,7 +15,8 @@ const defaultConfig: UserConfig = {
 	accessibleClaims: [],
 	inventoryLastSync: undefined,
 	autoRefreshMinutes: 5,
-	theme: 'dark'
+	theme: 'dark',
+	stripedRows: false
 };
 
 // Load from localStorage
@@ -48,7 +49,8 @@ if (browser) {
 				accessibleClaims: settings.accessibleClaims,
 				inventoryLastSync: settings.inventoryLastSync,
 				autoRefreshMinutes: settings.autoRefreshMinutes,
-				theme: settings.theme
+				theme: settings.theme,
+				stripedRows: settings.stripedRows
 			};
 
 			try {
@@ -97,4 +99,5 @@ export function resetSettings(): void {
 	settings.inventoryLastSync = defaultConfig.inventoryLastSync;
 	settings.autoRefreshMinutes = defaultConfig.autoRefreshMinutes;
 	settings.theme = defaultConfig.theme;
+	settings.stripedRows = defaultConfig.stripedRows;
 }
