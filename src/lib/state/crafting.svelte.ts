@@ -347,14 +347,14 @@ function getNodeId(node: MaterialNode): number {
  * @param trees - Material trees to process
  * @param haveItems - Map of itemId -> quantity you have
  * @param haveCargo - Map of cargoId -> quantity you have
- * @param checkedOff - Set of itemIds that are manually marked complete
+ * @param checkedOff - Set of material keys (e.g., 'item-123', 'cargo-456') that are manually marked complete
  * Returns: needs map and parent contributions map
  */
 function computeRemainingNeeds(
 	trees: MaterialNode[],
 	haveItems: Map<number, number>,
 	haveCargo: Map<number, number>,
-	checkedOff?: Set<number>
+	checkedOff?: Set<string>
 ): ComputeRemainingNeedsResult {
 	const needs = new Map<string, { baseRequired: number; remaining: number }>();
 	const parentContributions = new Map<string, Array<{ parentNodeKey: string; parentQuantityUsed: number; coverage: number }>>();
@@ -390,14 +390,21 @@ function computeRemainingNeeds(
 		if (node.nodeType === 'cargo') {
 			const cargoId = node.cargo!.id;
 
+			// If cargo is checked off, treat as fully satisfied
+			const isCheckedOff = checkedOff?.has(nodeKey) ?? false;
+
 			// Get current inventory and how much we've already used
 			const totalHave = haveCargo.get(cargoId) || 0;
 			const alreadyUsed = usedCargoInventory.get(cargoId) || 0;
-			const availableToUse = Math.max(0, totalHave - alreadyUsed);
 
-			// How much can we satisfy from inventory?
+			// If checked off, available is infinite (use full needed amount)
+			const availableToUse = isCheckedOff
+				? neededQuantity
+				: Math.max(0, totalHave - alreadyUsed);
+
+			// How much can we satisfy from inventory (or checked off)?
 			const useFromInventory = Math.min(availableToUse, neededQuantity);
-			if (useFromInventory > 0) {
+			if (useFromInventory > 0 && !isCheckedOff) {
 				usedCargoInventory.set(cargoId, alreadyUsed + useFromInventory);
 			}
 
@@ -424,7 +431,7 @@ function computeRemainingNeeds(
 						const childCoverage = childOriginal - childNeeded;
 
 						// Record partial coverage from this cargo's inventory
-						if (childCoverage > 0 && useFromInventory > 0) {
+						if (childCoverage > 0 && useFromInventory > 0 && !isCheckedOff) {
 							recordContribution(childKey, nodeKey, useFromInventory, childCoverage);
 							if (child.children.length > 0 && childCoverage > 0) {
 								const coveredRatio = childCoverage / childOriginal;
@@ -434,7 +441,7 @@ function computeRemainingNeeds(
 
 						traverse(child, childNeeded);
 					}
-				} else if (useFromInventory > 0) {
+				} else if (useFromInventory > 0 && !isCheckedOff) {
 					// Full coverage: record coverage for ALL descendants in subtree
 					recordCoverageForDescendants(node, nodeKey, useFromInventory);
 				}
@@ -461,7 +468,7 @@ function computeRemainingNeeds(
 		const itemId = node.item!.id;
 
 		// If item is checked off, treat as fully satisfied
-		const isCheckedOff = checkedOff?.has(itemId) ?? false;
+		const isCheckedOff = checkedOff?.has(nodeKey) ?? false;
 
 		// Get current inventory and how much we've already used
 		const totalHave = haveItems.get(itemId) || 0;
@@ -966,7 +973,12 @@ export async function calculateRequirementsFromEntries(
 	for (const tree of trees) {
 		const flattened = flattenMaterialTree(tree);
 		for (const mat of flattened) {
-			const key = mat.nodeType === 'cargo' ? `cargo-${mat.cargoId}` : `item-${mat.itemId}`;
+			// Use proper key for all node types
+			const key = mat.nodeType === 'cargo'
+				? `cargo-${mat.cargoId}`
+				: mat.nodeType === 'building'
+					? `building-${mat.buildingId}`
+					: `item-${mat.itemId}`;
 			const existing = flatMaterials.get(key);
 			if (existing) {
 				existing.quantity += mat.quantity;
@@ -1487,13 +1499,13 @@ function optimizeBatchQuantities(
  * Uses cached full trees and propagates inventory through them
  * @param listId - The list to calculate for
  * @param manualOverrides - Optional map of itemId -> quantity for manual "have" amounts
- * @param checkedOff - Optional set of itemIds that are manually marked complete
+ * @param checkedOff - Optional set of material keys (e.g., 'item-123', 'cargo-456') that are manually marked complete
  * @param recipePreferences - Optional map of recipe preferences for items in tree
  */
 export async function calculateListRequirements(
 	listId: string,
 	manualOverrides?: Map<number, number>,
-	checkedOff?: Set<number>,
+	checkedOff?: Set<string>,
 	recipePreferences?: Map<string, number>
 ): Promise<MaterialRequirement[]> {
 	const list = crafting.lists.find((l) => l.id === listId);
@@ -1537,6 +1549,9 @@ export async function calculateListRequirements(
 		if (mat.nodeType === 'cargo') {
 			return `cargo-${mat.cargoId}`;
 		}
+		if (mat.nodeType === 'building') {
+			return `building-${mat.buildingId}`;
+		}
 		return `item-${mat.itemId}`;
 	}
 
@@ -1558,8 +1573,9 @@ export async function calculateListRequirements(
 			rootName = rootCargo?.name || `Cargo #${entry.cargoId}`;
 			rootId = entry.cargoId;
 		} else {
-			// Building entry - will be handled when building support is added
-			rootName = `Building #${entry.constructionRecipeId}`;
+			// Building entry
+			const rootBuilding = getConstructionRecipeById(entry.constructionRecipeId);
+			rootName = rootBuilding?.name || `Building #${entry.constructionRecipeId}`;
 			rootId = entry.constructionRecipeId;
 		}
 

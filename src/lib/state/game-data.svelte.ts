@@ -356,6 +356,13 @@ export function searchCargos(query: string, limit = 20): Cargo[] {
 }
 
 /**
+ * Find all recipes that produce a given cargo
+ */
+export function findRecipesForCargo(cargoId: number): Recipe[] {
+	return gameData.cargoRecipes.get(cargoId) || [];
+}
+
+/**
  * Get construction recipe by ID
  */
 export function getConstructionRecipeById(recipeId: number): ConstructionRecipe | undefined {

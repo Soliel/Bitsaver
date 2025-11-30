@@ -31,6 +31,7 @@
 		getBuildingDescriptionById,
 		searchItems,
 		findRecipesForItem,
+		findRecipesForCargo,
 		searchConstructionRecipes
 	} from '$lib/state/game-data.svelte';
 	import type { ConstructionRecipe } from '$lib/types/game';
@@ -38,6 +39,8 @@
 	import { getListProgress, saveListProgress } from '$lib/services/cache';
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import RecipePopover from '$lib/components/RecipePopover.svelte';
+	import BuildingRecipePopover from '$lib/components/BuildingRecipePopover.svelte';
+	import CargoRecipePopover from '$lib/components/CargoRecipePopover.svelte';
 	import HaveBreakdownTooltip from '$lib/components/HaveBreakdownTooltip.svelte';
 	import DevRequirementBreakdown from '$lib/components/DevRequirementBreakdown.svelte';
 	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode, CraftingListEntry } from '$lib/types/app';
@@ -48,6 +51,9 @@
 		if (mat.nodeType === 'cargo') {
 			return `cargo-${mat.cargoId}`;
 		}
+		if (mat.nodeType === 'building') {
+			return `building-${mat.buildingId}`;
+		}
 		return `item-${mat.itemId}`;
 	}
 
@@ -56,6 +62,9 @@
 		if (mat.nodeType === 'cargo') {
 			return mat.cargo?.name ?? `Cargo #${mat.cargoId}`;
 		}
+		if (mat.nodeType === 'building') {
+			return mat.building?.name ?? mat.constructionRecipe?.name ?? `Building #${mat.buildingId}`;
+		}
 		return mat.item?.name ?? `Item #${mat.itemId}`;
 	}
 
@@ -63,6 +72,9 @@
 	function getMaterialIconUrl(mat: MaterialRequirement): string | null {
 		if (mat.nodeType === 'cargo' && mat.cargo?.iconAssetName) {
 			return getItemIconUrl(mat.cargo.iconAssetName);
+		}
+		if (mat.nodeType === 'building' && mat.building?.iconAssetName) {
+			return getItemIconUrl(mat.building.iconAssetName);
 		}
 		if (mat.item?.iconAssetName) {
 			return getItemIconUrl(mat.item.iconAssetName);
@@ -567,15 +579,9 @@
 					if (!isNaN(itemId)) itemManualHave.set(itemId, qty);
 				}
 			}
-			const itemCheckedOff = new Set<number>();
-			for (const key of checkedOff) {
-				if (key.startsWith('item-')) {
-					const itemId = parseInt(key.substring(5), 10);
-					if (!isNaN(itemId)) itemCheckedOff.add(itemId);
-				}
-			}
 
-			requirements = await calculateListRequirements(list.id, itemManualHave, itemCheckedOff, recipePreferences);
+			// checkedOff is already a Set<string> with keys like 'item-123', 'cargo-456'
+			requirements = await calculateListRequirements(list.id, itemManualHave, checkedOff, recipePreferences);
 			stepGroups = groupRequirementsByStep(requirements);
 			professionGroups = groupRequirementsByProfession(requirements);
 			combinedGroups = groupRequirementsByStepWithProfessions(requirements);
@@ -1468,19 +1474,74 @@
 													</div>
 												</div>
 											</RecipePopover>
+										{:else if isBuildingEntry(entry) && entryBuilding}
+											<!-- Building entry with recipe popover -->
+											<BuildingRecipePopover recipe={entryBuilding}>
+												<div class="flex min-w-0 flex-1 cursor-help items-center gap-3">
+													<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+														{#if iconUrl}
+															<img src={iconUrl} alt="" class="h-7 w-7 object-contain" />
+														{:else}
+															<span class="text-gray-500">🏠</span>
+														{/if}
+													</div>
+													<div class="min-w-0 flex-1">
+														<span class="text-sm text-white">{entryName}</span>
+														<span class="ml-1 text-xs text-purple-400">(Building)</span>
+														<span class="ml-1 text-sm text-purple-400 tabular-nums"
+															>x{formatQty(entry.quantity)}</span
+														>
+													</div>
+												</div>
+											</BuildingRecipePopover>
+										{:else if isCargoEntry(entry)}
+											<!-- Cargo entry with recipe popover -->
+											{@const cargoRecipes = findRecipesForCargo(entry.cargoId)}
+											{#if cargoRecipes.length > 0}
+												<CargoRecipePopover cargoId={entry.cargoId}>
+													<div class="flex min-w-0 flex-1 cursor-help items-center gap-3">
+														<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+															{#if iconUrl}
+																<img src={iconUrl} alt="" class="h-7 w-7 object-contain" />
+															{:else}
+																<span class="text-gray-500">📦</span>
+															{/if}
+														</div>
+														<div class="min-w-0 flex-1">
+															<span class="text-sm text-white">{entryName}</span>
+															<span class="ml-1 text-xs text-amber-400">(Cargo)</span>
+															<span class="ml-1 text-sm text-purple-400 tabular-nums"
+																>x{formatQty(entry.quantity)}</span
+															>
+														</div>
+													</div>
+												</CargoRecipePopover>
+											{:else}
+												<div class="flex min-w-0 flex-1 items-center gap-3">
+													<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+														{#if iconUrl}
+															<img src={iconUrl} alt="" class="h-7 w-7 object-contain" />
+														{:else}
+															<span class="text-gray-500">📦</span>
+														{/if}
+													</div>
+													<div class="min-w-0 flex-1">
+														<span class="text-sm text-white">{entryName}</span>
+														<span class="ml-1 text-xs text-amber-400">(Cargo)</span>
+														<span class="ml-1 text-sm text-purple-400 tabular-nums"
+															>x{formatQty(entry.quantity)}</span
+														>
+													</div>
+												</div>
+											{/if}
 										{:else}
-											<!-- Cargo entry - no recipe popover -->
+											<!-- Unknown entry type -->
 											<div class="flex min-w-0 flex-1 items-center gap-3">
 												<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
-													{#if iconUrl}
-														<img src={iconUrl} alt="" class="h-7 w-7 object-contain" />
-													{:else}
-														<span class="text-gray-500">📦</span>
-													{/if}
+													<span class="text-gray-500">?</span>
 												</div>
 												<div class="min-w-0 flex-1">
 													<span class="text-sm text-white">{entryName}</span>
-													<span class="ml-1 text-xs text-amber-400">(Cargo)</span>
 													<span class="ml-1 text-sm text-purple-400 tabular-nums"
 														>x{formatQty(entry.quantity)}</span
 													>
@@ -2283,18 +2344,58 @@
 						{/if}
 					</div>
 				</RecipePopover>
+			{:else if mat.nodeType === 'building' && mat.constructionRecipe}
+				<!-- Building with recipe popover -->
+				<BuildingRecipePopover recipe={mat.constructionRecipe}>
+					<div class="flex w-full cursor-help items-center gap-3">
+						<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+							{#if matIconUrl}
+								<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
+							{:else}
+								<span class="text-gray-500">🏠</span>
+							{/if}
+						</div>
+						<span class="flex-1 truncate text-sm text-white">{matName}</span>
+						<span class="text-xs text-purple-400">(Building)</span>
+					</div>
+				</BuildingRecipePopover>
+			{:else if mat.nodeType === 'cargo' && mat.cargoId !== undefined}
+				<!-- Cargo with recipe popover if craftable -->
+				{@const cargoRecipes = findRecipesForCargo(mat.cargoId)}
+				{#if cargoRecipes.length > 0}
+					<CargoRecipePopover cargoId={mat.cargoId}>
+						<div class="flex w-full cursor-help items-center gap-3">
+							<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+								{#if matIconUrl}
+									<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
+								{:else}
+									<span class="text-gray-500">📦</span>
+								{/if}
+							</div>
+							<span class="flex-1 truncate text-sm text-white">{matName}</span>
+							<span class="text-xs text-amber-400">(Cargo)</span>
+						</div>
+					</CargoRecipePopover>
+				{:else}
+					<div class="flex w-full items-center gap-3">
+						<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
+							{#if matIconUrl}
+								<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
+							{:else}
+								<span class="text-gray-500">📦</span>
+							{/if}
+						</div>
+						<span class="flex-1 truncate text-sm text-white">{matName}</span>
+						<span class="text-xs text-amber-400">(Cargo)</span>
+					</div>
+				{/if}
 			{:else}
-				<!-- Cargo - no recipe popover -->
+				<!-- Unknown type -->
 				<div class="flex w-full items-center gap-3">
 					<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center">
-						{#if matIconUrl}
-							<img src={matIconUrl} alt="" class="h-7 w-7 object-contain" />
-						{:else}
-							<span class="text-gray-500">📦</span>
-						{/if}
+						<span class="text-gray-500">?</span>
 					</div>
 					<span class="flex-1 truncate text-sm text-white">{matName}</span>
-					<span class="text-xs text-amber-400">(Cargo)</span>
 				</div>
 			{/if}
 			{#if isItemMaterial(mat) && mat.itemId !== undefined}
