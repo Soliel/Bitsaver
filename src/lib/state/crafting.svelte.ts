@@ -857,6 +857,136 @@ export async function duplicateList(listId: string): Promise<CraftingList | null
 }
 
 /**
+ * Shared list entry from API (without client-side fields)
+ */
+interface SharedListEntry {
+	type: 'item' | 'cargo' | 'building';
+	itemId?: number;
+	cargoId?: number;
+	constructionRecipeId?: number;
+	quantity: number;
+	recipeId?: number;
+}
+
+/**
+ * Shared list data from API
+ */
+export interface SharedListData {
+	name: string;
+	description?: string;
+	entries: SharedListEntry[];
+}
+
+/**
+ * Import a shared list as a new local list.
+ * Creates a fresh list with new IDs, no source restrictions.
+ */
+export async function importSharedList(sharedList: SharedListData): Promise<CraftingList> {
+	const now = Date.now();
+
+	// Convert shared entries to full CraftingListEntry objects
+	const entries: CraftingListEntry[] = sharedList.entries.map((entry) => {
+		const base = {
+			id: crypto.randomUUID(),
+			quantity: entry.quantity,
+			addedAt: now
+		};
+
+		if (entry.type === 'item') {
+			return {
+				...base,
+				type: 'item' as const,
+				itemId: entry.itemId!,
+				recipeId: entry.recipeId
+			};
+		} else if (entry.type === 'cargo') {
+			return {
+				...base,
+				type: 'cargo' as const,
+				cargoId: entry.cargoId!
+			};
+		} else {
+			return {
+				...base,
+				type: 'building' as const,
+				constructionRecipeId: entry.constructionRecipeId!
+			};
+		}
+	});
+
+	const imported: CraftingList = {
+		id: crypto.randomUUID(),
+		name: `${sharedList.name} (Imported)`,
+		description: sharedList.description,
+		entries,
+		enabledSourceIds: [], // Empty = all sources enabled
+		createdAt: now,
+		updatedAt: now
+	};
+
+	crafting.lists.push(imported);
+	await saveList(toPlainList(imported));
+
+	return imported;
+}
+
+/**
+ * Calculate material requirements from raw entries without requiring storage.
+ * Used for previewing shared lists before import.
+ * Returns requirements without inventory deductions (baseRequired = remaining).
+ */
+export async function calculateRequirementsFromEntries(
+	entries: SharedListEntry[]
+): Promise<FlatMaterial[]> {
+	const trees: MaterialNode[] = [];
+
+	// Build trees for each entry
+	for (const entry of entries) {
+		if (entry.type === 'item' && entry.itemId) {
+			const tree = await calculateMaterialTree(
+				entry.itemId,
+				entry.quantity,
+				entry.recipeId
+			);
+			if (tree) trees.push(tree);
+		} else if (entry.type === 'cargo' && entry.cargoId) {
+			const tree = await calculateCargoMaterialTree(entry.cargoId, entry.quantity);
+			if (tree) trees.push(tree);
+		} else if (entry.type === 'building' && entry.constructionRecipeId) {
+			const tree = await calculateBuildingMaterialTree(entry.constructionRecipeId, entry.quantity);
+			if (tree) trees.push(tree);
+		}
+	}
+
+	if (trees.length === 0) return [];
+
+	// Flatten and aggregate all materials
+	const flatMaterials = new Map<string, FlatMaterial>();
+
+	for (const tree of trees) {
+		const flattened = flattenMaterialTree(tree);
+		for (const mat of flattened) {
+			const key = mat.nodeType === 'cargo' ? `cargo-${mat.cargoId}` : `item-${mat.itemId}`;
+			const existing = flatMaterials.get(key);
+			if (existing) {
+				existing.quantity += mat.quantity;
+			} else {
+				flatMaterials.set(key, { ...mat });
+			}
+		}
+	}
+
+	// Sort by step ascending, then tier ascending
+	const result = Array.from(flatMaterials.values());
+	result.sort((a, b) => {
+		if (a.step !== b.step) return a.step - b.step;
+		return a.tier - b.tier;
+	});
+
+	return result;
+}
+
+/**
  * Update enabled sources for a list
  */
 export async function updateListSources(listId: string, sourceIds: string[]): Promise<void> {
@@ -880,6 +1010,35 @@ export async function updateListAutoRefresh(listId: string, enabled: boolean): P
 	await saveList(toPlainList(list));
 }
 
+/**
+ * Update share info for a list
+ */
+export async function updateListShare(
+	listId: string,
+	shareToken: string,
+	shareExpiresAt: number
+): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	list.shareToken = shareToken;
+	list.shareExpiresAt = shareExpiresAt;
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
+
+/**
+ * Clear share info for a list (e.g., when share expires or is revoked)
+ */
+export async function clearListShare(listId: string): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	delete list.shareToken;
+	delete list.shareExpiresAt;
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
 
 /**
  * Calculate material tree for an item (full tree, no inventory reduction)

@@ -45,6 +45,8 @@ export interface CraftingList {
 	entries: CraftingListEntry[]; // Renamed from 'items' for clarity with multiple types
 	enabledSourceIds: string[]; // Per-list inventory source selection
 	autoRefreshEnabled?: boolean; // Per-list auto-refresh toggle (undefined = true)
+	shareToken?: string; // Token for shared link (if shared)
+	shareExpiresAt?: number; // Expiration timestamp (if shared)
 	createdAt: number;
 	updatedAt: number;
 }

@@ -10,6 +10,7 @@
 		updateEntryQuantity,
 		updateListSources,
 		updateListAutoRefresh,
+		updateListShare,
 		calculateListRequirements,
 		groupRequirementsByStep,
 		groupRequirementsByProfession,
@@ -93,6 +94,13 @@
 	let viewMode = $state<ListViewMode>('step');
 	let hideCompleted = $state(false);
 	let collapsedSections = $state<Set<string>>(new Set());
+
+	// Sharing state
+	let isSharing = $state(false);
+	let shareUrl = $state<string | null>(null);
+	let shareError = $state<string | null>(null);
+	let showShareModal = $state(false);
+	let shareCopied = $state(false);
 
 	// Manual tracking: user-entered "have" quantities and checked-off items
 	// Uses string keys to support both items ("item-123") and cargo ("cargo-456")
@@ -478,6 +486,57 @@
 		if (!list) return;
 		const newValue = list.autoRefreshEnabled === false;
 		await updateListAutoRefresh(list.id, newValue);
+	}
+
+	async function handleShare() {
+		if (!list) return;
+
+		// Check if list already has a valid (non-expired) share
+		if (list.shareToken && list.shareExpiresAt && list.shareExpiresAt > Date.now()) {
+			shareUrl = `${window.location.origin}/share/${list.shareToken}`;
+			showShareModal = true;
+			return;
+		}
+
+		isSharing = true;
+		shareError = null;
+
+		try {
+			const response = await fetch('/api/share', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(list)
+			});
+
+			if (!response.ok) {
+				const data = await response.json().catch(() => ({ message: 'Failed to share' }));
+				throw new Error(data.message || 'Failed to create share link');
+			}
+
+			const data = await response.json();
+			shareUrl = `${window.location.origin}${data.shareUrl}`;
+
+			// Save share info to the list
+			const expiresAt = new Date(data.expiresAt).getTime();
+			await updateListShare(list.id, data.token, expiresAt);
+
+			showShareModal = true;
+		} catch (e) {
+			shareError = e instanceof Error ? e.message : 'Failed to create share link';
+			showShareModal = true;
+		} finally {
+			isSharing = false;
+		}
+	}
+
+	function copyShareUrl() {
+		if (shareUrl) {
+			navigator.clipboard.writeText(shareUrl);
+			shareCopied = true;
+			setTimeout(() => {
+				shareCopied = false;
+			}, 2000);
+		}
 	}
 
 	async function handleManualSync() {
@@ -909,6 +968,35 @@
 								/>
 							</svg>
 							Refresh
+						</span>
+					{/if}
+				</button>
+
+				<!-- Share Button -->
+				<button
+					onclick={handleShare}
+					disabled={isSharing || !list?.entries.length}
+					class="rounded-lg bg-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-600 disabled:opacity-50"
+					title="Share this list"
+				>
+					{#if isSharing}
+						<span class="flex items-center gap-2">
+							<span
+								class="h-4 w-4 animate-spin rounded-full border-2 border-gray-400 border-t-transparent"
+							></span>
+							Sharing...
+						</span>
+					{:else}
+						<span class="flex items-center gap-2">
+							<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									stroke-width="2"
+									d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"
+								/>
+							</svg>
+							Share
 						</span>
 					{/if}
 				</button>
@@ -1885,6 +1973,76 @@
 						Save Selection
 					</button>
 				</div>
+			</div>
+		</div>
+	{/if}
+
+	<!-- Share Modal -->
+	{#if showShareModal}
+		<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+			<button
+				type="button"
+				class="absolute inset-0 bg-black/70"
+				aria-label="Close share modal"
+				onclick={() => {
+					showShareModal = false;
+					shareError = null;
+					shareCopied = false;
+				}}
+			></button>
+			<div class="relative w-full max-w-md rounded-lg bg-gray-800 p-6 shadow-xl">
+				{#if shareError}
+					<h3 class="text-lg font-semibold text-red-400">Share Failed</h3>
+					<p class="mt-2 text-sm text-gray-300">{shareError}</p>
+					<button
+						onclick={() => {
+							showShareModal = false;
+							shareError = null;
+						}}
+						class="mt-4 w-full rounded-lg bg-gray-700 py-2 text-gray-300 hover:bg-gray-600"
+					>
+						Close
+					</button>
+				{:else}
+					<h3 class="text-lg font-semibold text-white">Share List</h3>
+					<p class="mt-2 text-sm text-gray-400">
+						Anyone with this link can view your list. Link expires in 1 week.
+					</p>
+					<div class="mt-4 flex gap-2">
+						<input
+							type="text"
+							readonly
+							value={shareUrl}
+							class="flex-1 rounded-lg border border-gray-600 bg-gray-700 px-3 py-2 text-sm text-white"
+						/>
+						<button
+							onclick={copyShareUrl}
+							class="rounded-lg px-4 py-2 text-white transition-colors {shareCopied
+								? 'bg-green-600'
+								: 'bg-blue-600 hover:bg-blue-700'}"
+						>
+							{#if shareCopied}
+								<span class="flex items-center gap-1">
+									<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+									</svg>
+									Copied!
+								</span>
+							{:else}
+								Copy
+							{/if}
+						</button>
+					</div>
+					<button
+						onclick={() => {
+							showShareModal = false;
+							shareCopied = false;
+						}}
+						class="mt-4 w-full rounded-lg bg-gray-700 py-2 text-gray-300 hover:bg-gray-600"
+					>
+						Close
+					</button>
+				{/if}
 			</div>
 		</div>
 	{/if}
