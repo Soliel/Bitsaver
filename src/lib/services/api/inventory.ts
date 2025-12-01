@@ -165,7 +165,7 @@ export function parseBuildingInventory(
 
 	for (const slot of inventory) {
 		if (slot?.contents && slot.contents.quantity > 0) {
-			if (slot.contents.item_type === 'Cargo') {
+			if (slot.contents.item_type === 'cargo') {
 				cargos.push({
 					cargoId: slot.contents.item_id,
 					quantity: slot.contents.quantity,
