@@ -16,6 +16,8 @@ export interface InventorySource {
 	claimName?: string;
 	enabled: boolean; // User toggle
 	lastSynced?: number; // Timestamp
+	isExternal?: boolean; // True if from an external player/claim
+	externalRefId?: string; // "player:{id}" or "claim:{id}" linking to ExternalInventoryRef
 }
 
 // Item in a specific source

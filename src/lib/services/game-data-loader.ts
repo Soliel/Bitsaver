@@ -4,7 +4,7 @@
  */
 
 // Bump this version when data loading logic changes to force cache refresh
-export const DATA_LOADER_VERSION = 15;
+export const DATA_LOADER_VERSION = 16;
 
 import type {
 	Item,
@@ -220,9 +220,13 @@ const RARITY_MAP: Record<string, number> = {
 };
 
 // Building types to exclude (not true crafting recipes)
-const EXCLUDED_BUILDING_TYPES = new Set([
-	127749503 // Scrap Bench - used for recrafting/recycling, not crafting
+const EXCLUDED_BUILDING_TYPES = new Set<number>([
+	// Empty - Scrap Bench recipes are now conditionally included
 ]);
+
+// Scrap Bench configuration
+const SCRAP_BENCH_ID = 127749503;
+const ALLOWED_SCRAP_TYPES = ['Tool Scrap', 'Weapon Scrap', 'Armor Scrap'];
 
 // Knowledge IDs that block recipes (developer/debug only)
 const BLOCKED_KNOWLEDGE_IDS = new Set([
@@ -490,6 +494,29 @@ function parseRecipes(
 		const outputStack = raw.crafted_item_stacks.find((s) => s.item_type === 'Item');
 		if (!outputStack) {
 			continue;
+		}
+
+		// Special handling for Scrap Bench recipes
+		if (raw.building_requirement?.building_type === SCRAP_BENCH_ID) {
+			const outputItem = rawItemById.get(outputStack.item_id);
+
+			// Only allow Tool, Weapon, or Armor scraps
+			const isAllowedScrap = outputItem &&
+				ALLOWED_SCRAP_TYPES.some(type => outputItem.name.includes(type));
+			if (!isAllowedScrap) {
+				continue;
+			}
+
+			// Only allow recipes with Common rarity inputs
+			const allInputsCommon = (raw.consumed_item_stacks || [])
+				.filter(s => s.item_type === 'Item')
+				.every(s => {
+					const inputItem = rawItemById.get(s.item_id);
+					return inputItem && inputItem.rarity === 'Common';
+				});
+			if (!allInputsCommon) {
+				continue;
+			}
 		}
 
 		// Parse item ingredients

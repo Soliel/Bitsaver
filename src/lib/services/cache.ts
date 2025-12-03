@@ -9,7 +9,7 @@ import type { CraftingList, CacheMetadata, ListProgress } from '$lib/types/app';
 
 // Database schema version
 const DB_NAME = 'bitsaver';
-const DB_VERSION = 8; // Incremented for cargo recipes
+const DB_VERSION = 9; // Incremented for external inventory sources
 
 // Cache TTL constants (in milliseconds)
 export const CACHE_TTL = {
@@ -84,6 +84,7 @@ interface BithelperDB extends DBSchema {
 		indexes: {
 			'by-type': string;
 			'by-claim': string;
+			'by-external-ref': string;
 		};
 	};
 	inventoryItems: {
@@ -146,7 +147,7 @@ export async function getDB(): Promise<IDBPDatabase<BithelperDB>> {
 	if (dbInstance) return dbInstance;
 
 	dbInstance = await openDB<BithelperDB>(DB_NAME, DB_VERSION, {
-		upgrade(db, oldVersion) {
+		upgrade(db, oldVersion, _newVersion, transaction) {
 			// Items store
 			if (!db.objectStoreNames.contains('items')) {
 				const itemStore = db.createObjectStore('items', { keyPath: 'id' });
@@ -198,6 +199,7 @@ export async function getDB(): Promise<IDBPDatabase<BithelperDB>> {
 				const sourceStore = db.createObjectStore('inventorySources', { keyPath: 'id' });
 				sourceStore.createIndex('by-type', 'type');
 				sourceStore.createIndex('by-claim', 'claimId');
+				sourceStore.createIndex('by-external-ref', 'externalRefId');
 			}
 
 			// Inventory items store
@@ -245,6 +247,14 @@ export async function getDB(): Promise<IDBPDatabase<BithelperDB>> {
 			if (!db.objectStoreNames.contains('buildingDescriptions')) {
 				const buildingDescStore = db.createObjectStore('buildingDescriptions', { keyPath: 'id' });
 				buildingDescStore.createIndex('by-name', 'name');
+			}
+
+			// Add external ref index to inventory sources (new in v9)
+			if (oldVersion < 9 && oldVersion > 0 && db.objectStoreNames.contains('inventorySources')) {
+				const sourceStore = transaction.objectStore('inventorySources');
+				if (!sourceStore.indexNames.contains('by-external-ref')) {
+					sourceStore.createIndex('by-external-ref', 'externalRefId');
+				}
 			}
 		}
 	});
@@ -406,6 +416,26 @@ export async function getCachedSourcesByType(type: string): Promise<InventorySou
 export async function getCachedSourcesByClaim(claimId: string): Promise<InventorySource[]> {
 	const db = await getDB();
 	return db.getAllFromIndex('inventorySources', 'by-claim', claimId);
+}
+
+/**
+ * Get sources by external ref ID
+ */
+export async function getCachedSourcesByExternalRef(
+	externalRefId: string
+): Promise<InventorySource[]> {
+	const db = await getDB();
+	return db.getAllFromIndex('inventorySources', 'by-external-ref', externalRefId);
+}
+
+/**
+ * Delete all sources for an external ref and their items/cargos
+ */
+export async function deleteSourcesByExternalRef(externalRefId: string): Promise<void> {
+	const sources = await getCachedSourcesByExternalRef(externalRefId);
+	for (const source of sources) {
+		await deleteSource(source.id);
+	}
 }
 
 /**

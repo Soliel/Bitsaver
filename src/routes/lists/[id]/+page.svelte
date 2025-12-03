@@ -8,19 +8,31 @@
 		removeEntryFromList,
 		updateItemQuantity,
 		updateEntryQuantity,
+		updateEntryRecipe,
 		updateListSources,
 		updateListAutoRefresh,
 		updateListShare,
 		calculateListRequirements,
 		groupRequirementsByStep,
 		groupRequirementsByProfession,
-		groupRequirementsByStepWithProfessions
+		groupRequirementsByStepWithProfessions,
+		addExternalRefToList,
+		removeExternalRefFromList,
+		syncExternalInventoriesForList,
+		getStaleExternalRefs,
+		isExternalRefStale
 	} from '$lib/state/crafting.svelte';
 	import {
 		inventory,
 		syncIfStale,
 		syncAllInventories,
-		sourcesByClaim
+		sourcesByClaim,
+		localSourcesByClaim,
+		externalSourcesByRef,
+		getExternalSourcesByRef,
+		syncExternalPlayerInventory,
+		syncExternalClaimInventory,
+		externalSyncState
 	} from '$lib/state/inventory.svelte';
 	import { settings } from '$lib/state/settings.svelte';
 	import {
@@ -43,7 +55,8 @@
 	import CargoRecipePopover from '$lib/components/CargoRecipePopover.svelte';
 	import HaveBreakdownTooltip from '$lib/components/HaveBreakdownTooltip.svelte';
 	import DevRequirementBreakdown from '$lib/components/DevRequirementBreakdown.svelte';
-	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode, CraftingListEntry } from '$lib/types/app';
+	import ExternalInventoryModal from '$lib/components/ExternalInventoryModal.svelte';
+	import type { MaterialRequirement, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ListViewMode, CraftingListEntry, ExternalInventoryRef } from '$lib/types/app';
 	import { isItemEntry, isCargoEntry, isBuildingEntry } from '$lib/types/app';
 
 	// Helper: Get unique material key for tracking
@@ -386,11 +399,16 @@
 	let showSourceModal = $state(false);
 	let selectedSourceIds = $state<string[]>([]);
 
+	// External inventory modal
+	let showExternalModal = $state(false);
+	let externalSyncing = $state<string | null>(null); // externalRefId currently syncing
+
 	// Recipe selection modal
 	let showRecipeModal = $state(false);
 	let recipeModalItemId = $state<number | null>(null);
 	let recipeModalMaterialKey = $state<string | null>(null);
 	let selectedModalRecipeId = $state<number | undefined>(undefined);
+	let recipeModalIsTopLevel = $state(false); // true if editing a top-level list entry
 
 	// Auto-sync on mount (wait for game data to be loaded)
 	$effect(() => {
@@ -480,7 +498,25 @@
 
 		isSyncing = true;
 		try {
-			const didSync = await syncIfStale();
+			let didSync = await syncIfStale();
+
+			// Also sync stale external inventories for this list
+			if (list?.externalInventoryRefs?.length) {
+				const staleRefs = getStaleExternalRefs(list.id, settings.autoRefreshMinutes);
+				for (const ref of staleRefs) {
+					try {
+						if (ref.type === 'player') {
+							await syncExternalPlayerInventory(ref.entityId, ref.name);
+						} else {
+							await syncExternalClaimInventory(ref.entityId, ref.name);
+						}
+						didSync = true;
+					} catch (e) {
+						console.error(`Failed to auto-sync external ${ref.type} ${ref.entityId}:`, e);
+					}
+				}
+			}
+
 			if (didSync) {
 				lastSyncMessage = 'Inventory synced automatically';
 				setTimeout(() => (lastSyncMessage = null), 3000);
@@ -809,7 +845,78 @@
 		}
 	}
 
-	function openRecipeModal(mat: MaterialRequirement) {
+	// External inventory handlers
+	async function handleAddExternalRef(ref: ExternalInventoryRef) {
+		if (!list) return;
+		await addExternalRefToList(list.id, ref);
+		// Add the new sources to selectedSourceIds
+		const externalRefId = `${ref.type}:${ref.entityId}`;
+		const newSources = getExternalSourcesByRef(externalRefId);
+		if (selectedSourceIds.length > 0) {
+			// If we have specific sources selected, add the new ones
+			const newIds = new Set([...selectedSourceIds, ...newSources.map((s) => s.id)]);
+			selectedSourceIds = [...newIds];
+		}
+		showExternalModal = false;
+		await calculateRequirements();
+	}
+
+	async function handleRemoveExternalRef(externalRefId: string) {
+		if (!list) return;
+		await removeExternalRefFromList(list.id, externalRefId);
+		await calculateRequirements();
+	}
+
+	async function handleSyncExternalRef(ref: ExternalInventoryRef) {
+		const externalRefId = `${ref.type}:${ref.entityId}`;
+		externalSyncing = externalRefId;
+		try {
+			if (ref.type === 'player') {
+				await syncExternalPlayerInventory(ref.entityId, ref.name);
+			} else {
+				await syncExternalClaimInventory(ref.entityId, ref.name);
+			}
+			await calculateRequirements();
+		} catch (e) {
+			console.error(`Failed to sync external ${ref.type}:`, e);
+		} finally {
+			externalSyncing = null;
+		}
+	}
+
+	function toggleExternalSource(sourceId: string) {
+		// Same logic as toggleSource
+		if (selectedSourceIds.length === 0) {
+			const allIds = inventory.sources.map((s) => s.id);
+			selectedSourceIds = allIds.filter((id) => id !== sourceId);
+		} else if (selectedSourceIds.includes(sourceId)) {
+			selectedSourceIds = selectedSourceIds.filter((id) => id !== sourceId);
+		} else {
+			selectedSourceIds = [...selectedSourceIds, sourceId];
+		}
+	}
+
+	function toggleAllExternalSources(externalRefId: string, enable: boolean) {
+		const externalSources = getExternalSourcesByRef(externalRefId);
+		const externalSourceIds = externalSources.map((s) => s.id);
+
+		if (enable) {
+			if (selectedSourceIds.length === 0) {
+				return; // Already all selected
+			}
+			const newIds = new Set([...selectedSourceIds, ...externalSourceIds]);
+			selectedSourceIds = [...newIds];
+		} else {
+			if (selectedSourceIds.length === 0) {
+				const allIds = inventory.sources.map((s) => s.id);
+				selectedSourceIds = allIds.filter((id) => !externalSourceIds.includes(id));
+			} else {
+				selectedSourceIds = selectedSourceIds.filter((id) => !externalSourceIds.includes(id));
+			}
+		}
+	}
+
+	function openRecipeModal(mat: MaterialRequirement, isTopLevel = false) {
 		if (mat.nodeType !== 'item' || !mat.itemId) return;
 
 		const recipes = findRecipesForItem(mat.itemId);
@@ -834,18 +941,32 @@
 
 		recipeModalItemId = mat.itemId;
 		recipeModalMaterialKey = getMaterialKey(mat);
-		selectedModalRecipeId = recipePreferences.get(recipeModalMaterialKey) ?? getDefaultRecipeId(mat.itemId);
+		recipeModalIsTopLevel = isTopLevel;
+
+		// For top-level items, get current recipe from entry; for sub-materials, use preferences
+		if (isTopLevel && list) {
+			const entry = list.entries.find(e => isItemEntry(e) && e.itemId === mat.itemId);
+			selectedModalRecipeId = (entry && isItemEntry(entry) ? entry.recipeId : undefined) ?? getDefaultRecipeId(mat.itemId);
+		} else {
+			selectedModalRecipeId = recipePreferences.get(recipeModalMaterialKey) ?? getDefaultRecipeId(mat.itemId);
+		}
 		showRecipeModal = true;
 	}
 
-	function applyRecipeSelection() {
+	async function applyRecipeSelection() {
 		if (!recipeModalMaterialKey || selectedModalRecipeId === undefined) return;
 
-		const newMap = new Map(recipePreferences);
-		newMap.set(recipeModalMaterialKey, selectedModalRecipeId);
-		recipePreferences = newMap;
+		if (recipeModalIsTopLevel && list && recipeModalItemId) {
+			// For top-level items, update the entry's recipeId
+			await updateEntryRecipe(list.id, recipeModalItemId, selectedModalRecipeId);
+		} else {
+			// For sub-materials, update recipe preferences
+			const newMap = new Map(recipePreferences);
+			newMap.set(recipeModalMaterialKey, selectedModalRecipeId);
+			recipePreferences = newMap;
+			scheduleProgressSave();
+		}
 
-		scheduleProgressSave();
 		calculateRequirements(); // Recalculate with new recipe
 
 		closeRecipeModal();
@@ -856,6 +977,7 @@
 		recipeModalItemId = null;
 		recipeModalMaterialKey = null;
 		selectedModalRecipeId = undefined;
+		recipeModalIsTopLevel = false;
 	}
 
 	function formatLastSync(): string {
@@ -1436,7 +1558,7 @@
 													<div class="min-w-0 flex-1 flex items-center gap-1">
 														<span class="text-sm text-white">{entryName}</span>
 														{#if validRecipes.length > 1}
-															{@const currentRecipeId = recipePreferences.get(entryKey)}
+															{@const currentRecipeId = entry.recipeId}
 															{@const sortedRecipes = validRecipes.sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity))}
 															{@const defaultRecipeId = sortedRecipes[0]?.id}
 															{@const isNonDefault = currentRecipeId !== undefined && currentRecipeId !== defaultRecipeId}
@@ -1449,7 +1571,7 @@
 																		itemId: entry.itemId,
 																		item: entryItem
 																	};
-																	openRecipeModal(mockMat as any);
+																	openRecipeModal(mockMat as any, true);
 																}}
 																class="relative flex-shrink-0 p-0.5 rounded border text-xs transition-colors
 																	{isNonDefault
@@ -1962,7 +2084,16 @@
 			<div
 				class="relative max-h-[80vh] w-full max-w-lg overflow-auto rounded-lg bg-gray-800 p-6 shadow-xl"
 			>
-				<h3 class="text-lg font-semibold text-white">Select Inventory Sources</h3>
+				<div class="flex items-center justify-between">
+					<h3 class="text-lg font-semibold text-white">Select Inventory Sources</h3>
+					<button
+						type="button"
+						onclick={() => (showExternalModal = true)}
+						class="rounded-lg bg-green-600 px-3 py-1.5 text-sm text-white hover:bg-green-700"
+					>
+						+ Add External
+					</button>
+				</div>
 				<p class="mt-1 text-sm text-gray-400">
 					Choose which inventories to include when calculating materials for this list.
 					{#if selectedSourceIds.length === 0}
@@ -1971,7 +2102,16 @@
 				</p>
 
 				<div class="mt-4 space-y-4">
-					{#each [...sourcesByClaim.value.entries()] as [claimId, sources] (claimId)}
+					<!-- Your Inventory Section -->
+					{#if localSourcesByClaim.value.size > 0}
+						<div class="border-b border-gray-600 pb-2">
+							<span class="text-xs font-semibold uppercase tracking-wider text-gray-500"
+								>Your Inventory</span
+							>
+						</div>
+					{/if}
+
+					{#each [...localSourcesByClaim.value.entries()] as [claimId, sources] (claimId)}
 						{@const claimName =
 							claimId === 'player'
 								? 'Player Inventory'
@@ -2011,10 +2151,106 @@
 						</div>
 					{/each}
 
-					{#if sourcesByClaim.value.size === 0}
+					{#if localSourcesByClaim.value.size === 0}
 						<p class="text-center text-gray-400">
 							No inventory sources available. Refresh inventory to load sources.
 						</p>
+					{/if}
+
+					<!-- External Sources Section -->
+					{#if list?.externalInventoryRefs && list.externalInventoryRefs.length > 0}
+						<div class="border-b border-gray-600 pb-2 pt-4">
+							<span class="text-xs font-semibold uppercase tracking-wider text-gray-500"
+								>External Sources</span
+							>
+						</div>
+
+						{#each list.externalInventoryRefs as ref (`${ref.type}:${ref.entityId}`)}
+							{@const externalRefId = `${ref.type}:${ref.entityId}`}
+							{@const sources = getExternalSourcesByRef(externalRefId)}
+							{@const allSelected = sources.every(
+								(s) => selectedSourceIds.length === 0 || selectedSourceIds.includes(s.id)
+							)}
+							{@const isSyncing = externalSyncing === externalRefId}
+							{@const syncError = externalSyncState.errors.get(externalRefId)}
+
+							<div class="rounded-lg border border-gray-600 p-3">
+								<div class="flex items-center justify-between">
+									<label class="flex cursor-pointer items-center gap-2">
+										<input
+											type="checkbox"
+											checked={allSelected}
+											onchange={() => toggleAllExternalSources(externalRefId, !allSelected)}
+											class="rounded border-gray-500 bg-gray-700 text-blue-600 focus:ring-blue-500"
+										/>
+										<span class="font-medium text-white">
+											{ref.type === 'player' ? '👤' : '🏰'}
+											{ref.name}
+										</span>
+									</label>
+									<div class="flex items-center gap-2">
+										<button
+											type="button"
+											onclick={() => handleSyncExternalRef(ref)}
+											disabled={isSyncing}
+											class="rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-700 hover:text-white disabled:opacity-50"
+											title="Sync inventory"
+										>
+											{#if isSyncing}
+												<span
+													class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent"
+												></span>
+											{:else}
+												↻
+											{/if}
+										</button>
+										<button
+											type="button"
+											onclick={() => handleRemoveExternalRef(externalRefId)}
+											class="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-900/50 hover:text-red-300"
+											title="Remove"
+										>
+											✕
+										</button>
+									</div>
+								</div>
+
+								{#if syncError}
+									<p class="mt-1 text-xs text-red-400">{syncError}</p>
+								{/if}
+
+								{#if sources.length > 0}
+									<div class="mt-2 space-y-1">
+										{#each sources as source (source.id)}
+											<label
+												class="flex cursor-pointer items-center gap-2 rounded p-1 hover:bg-gray-700"
+											>
+												<input
+													type="checkbox"
+													checked={selectedSourceIds.length === 0 ||
+														selectedSourceIds.includes(source.id)}
+													onchange={() => toggleExternalSource(source.id)}
+													class="rounded border-gray-500 bg-gray-700 text-blue-600 focus:ring-blue-500"
+												/>
+												<span class="text-sm text-gray-300"
+													>{source.nickname || source.name}</span
+												>
+											</label>
+										{/each}
+									</div>
+								{:else}
+									<p class="mt-2 text-xs text-gray-400">
+										No inventory data. Click sync to fetch.
+									</p>
+								{/if}
+
+								{#if ref.lastFetched}
+									<p class="mt-1 text-xs text-gray-500">
+										Last synced: {new Date(ref.lastFetched).toLocaleTimeString()}
+									</p>
+								{/if}
+							</div>
+						{/each}
 					{/if}
 				</div>
 
@@ -2036,6 +2272,16 @@
 				</div>
 			</div>
 		</div>
+	{/if}
+
+	<!-- External Inventory Modal -->
+	{#if showExternalModal && list}
+		<ExternalInventoryModal
+			listId={list.id}
+			existingRefs={list.externalInventoryRefs ?? []}
+			onClose={() => (showExternalModal = false)}
+			onAdd={handleAddExternalRef}
+		/>
 	{/if}
 
 	<!-- Share Modal -->

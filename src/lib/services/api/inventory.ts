@@ -256,6 +256,116 @@ function determineSourceType(buildingName: string): InventorySource['type'] {
 }
 
 /**
+ * Parse external player inventory into InventorySource, SourcedItems, and SourcedCargos
+ * Similar to parsePlayerInventory but marks sources as external
+ */
+export function parseExternalPlayerInventory(
+	inventories: PlayerInventoryEntry[],
+	playerId: string,
+	playerName: string
+): { sources: InventorySource[]; items: SourcedItem[]; cargos: SourcedCargo[] } {
+	const sources: InventorySource[] = [];
+	const items: SourcedItem[] = [];
+	const cargos: SourcedCargo[] = [];
+	const externalRefId = `player:${playerId}`;
+
+	for (const inv of inventories) {
+		const sourceId = `external:player:${playerId}:${inv.entityId}`;
+		const displayName = inv.inventoryName || inv.buildingName || 'Unknown';
+
+		const source: InventorySource = {
+			id: sourceId,
+			type: determineSourceType(displayName),
+			name: `${playerName} - ${displayName}`,
+			claimId: inv.claimEntityId || undefined,
+			claimName: inv.claimName || undefined,
+			enabled: true,
+			lastSynced: Date.now(),
+			isExternal: true,
+			externalRefId
+		};
+
+		sources.push(source);
+
+		// Parse pockets (camelCase format)
+		for (const pocket of inv.pockets || []) {
+			if (pocket?.contents && pocket.contents.quantity > 0) {
+				if (pocket.contents.itemType === ITEM_TYPE_CARGO) {
+					cargos.push({
+						cargoId: pocket.contents.itemId,
+						quantity: pocket.contents.quantity,
+						sourceId
+					});
+				} else {
+					items.push({
+						itemId: pocket.contents.itemId,
+						itemType: String(pocket.contents.itemType),
+						quantity: pocket.contents.quantity,
+						sourceId
+					});
+				}
+			}
+		}
+	}
+
+	return { sources, items, cargos };
+}
+
+/**
+ * Parse external building inventory into InventorySource, SourcedItems, and SourcedCargos
+ * Similar to parseBuildingInventory but marks sources as external
+ */
+export function parseExternalBuildingInventory(
+	building: BuildingInventory,
+	claimId: string,
+	claimName: string
+): { source: InventorySource; items: SourcedItem[]; cargos: SourcedCargo[] } {
+	const sourceId = `external:claim:${claimId}:${building.entityId}`;
+	const externalRefId = `claim:${claimId}`;
+
+	const source: InventorySource = {
+		id: sourceId,
+		type: 'claim_building',
+		name: `${claimName} - ${building.buildingName || 'Unknown'}`,
+		nickname: building.buildingNickname,
+		icon: building.iconAssetName,
+		claimId,
+		claimName,
+		enabled: true,
+		lastSynced: Date.now(),
+		isExternal: true,
+		externalRefId
+	};
+
+	const items: SourcedItem[] = [];
+	const cargos: SourcedCargo[] = [];
+
+	// Handle case where inventory might not exist or be in a different format
+	const inventory = building.inventory || [];
+
+	for (const slot of inventory) {
+		if (slot?.contents && slot.contents.quantity > 0) {
+			if (slot.contents.item_type === 'cargo') {
+				cargos.push({
+					cargoId: slot.contents.item_id,
+					quantity: slot.contents.quantity,
+					sourceId
+				});
+			} else {
+				items.push({
+					itemId: slot.contents.item_id,
+					itemType: slot.contents.item_type,
+					quantity: slot.contents.quantity,
+					sourceId
+				});
+			}
+		}
+	}
+
+	return { source, items, cargos };
+}
+
+/**
  * Aggregate items from multiple sources, combining quantities for same itemId
  */
 export function aggregateItems(items: SourcedItem[]): Map<number, SourcedItem[]> {

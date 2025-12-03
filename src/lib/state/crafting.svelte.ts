@@ -3,12 +3,12 @@
  * Persisted to IndexedDB
  */
 
-import type { CraftingList, CraftingListItem, CraftingListEntry, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution, RootItemContribution, ItemListEntry, CargoListEntry, BuildingListEntry } from '$lib/types/app';
+import type { CraftingList, CraftingListItem, CraftingListEntry, MaterialRequirement, TierGroup, StepGroup, ProfessionGroup, StepWithProfessionsGroup, ParentContribution, RootItemContribution, ItemListEntry, CargoListEntry, BuildingListEntry, ExternalInventoryRef } from '$lib/types/app';
 import { isItemEntry, isCargoEntry, isBuildingEntry } from '$lib/types/app';
 import type { MaterialNode, FlatMaterial, Item, Recipe, Cargo, MaterialNodeType } from '$lib/types/game';
 import { getCachedLists, getCachedList, saveList, deleteList as deleteCachedList, deleteListProgress } from '$lib/services/cache';
 import { gameData, getItemById, getItemWithRecipes, getCargoById, getConstructionRecipeById, getBuildingDescriptionById, findConstructionRecipeByBuildingId } from './game-data.svelte';
-import { allocateMaterialsFromSources, getAggregatedInventoryForSources, getAggregatedCargoForSources } from './inventory.svelte';
+import { allocateMaterialsFromSources, getAggregatedInventoryForSources, getAggregatedCargoForSources, getEnabledSources, removeExternalSources, syncExternalPlayerInventory, syncExternalClaimInventory, getExternalSourcesByRef } from './inventory.svelte';
 import {
 	type RecipeContext,
 	calculateItemNaturalStep as calcStep,
@@ -623,7 +623,7 @@ export async function createList(name: string, description?: string): Promise<Cr
 		name,
 		description,
 		entries: [],
-		enabledSourceIds: [], // Empty means use all available sources
+		enabledSourceIds: getEnabledSources().map(s => s.id),
 		createdAt: now,
 		updatedAt: now
 	};
@@ -776,6 +776,27 @@ export async function updateEntryQuantity(
 	if (entry) {
 		entry.quantity = Math.max(0, quantity);
 		list.updatedAt = Date.now();
+		await saveList(toPlainList(list));
+	}
+}
+
+/**
+ * Update entry's recipe selection
+ */
+export async function updateEntryRecipe(
+	listId: string,
+	itemId: number,
+	recipeId: number
+): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	const entry = list.entries.find((e) => isItemEntry(e) && e.itemId === itemId);
+	if (entry && isItemEntry(entry)) {
+		entry.recipeId = recipeId;
+		list.updatedAt = Date.now();
+		// Clear tree cache since recipe changed
+		listTreeCache.delete(list.id);
 		await saveList(toPlainList(list));
 	}
 }
@@ -1050,6 +1071,144 @@ export async function clearListShare(listId: string): Promise<void> {
 	delete list.shareExpiresAt;
 	list.updatedAt = Date.now();
 	await saveList(toPlainList(list));
+}
+
+// ============================================================================
+// External Inventory Reference Management
+// ============================================================================
+
+/**
+ * Add an external inventory reference to a list
+ */
+export async function addExternalRefToList(
+	listId: string,
+	ref: ExternalInventoryRef
+): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	// Initialize array if needed
+	if (!list.externalInventoryRefs) {
+		list.externalInventoryRefs = [];
+	}
+
+	// Check for duplicate
+	const externalRefId = `${ref.type}:${ref.entityId}`;
+	const exists = list.externalInventoryRefs.some(
+		(r) => r.type === ref.type && r.entityId === ref.entityId
+	);
+	if (exists) return;
+
+	// Add the reference
+	list.externalInventoryRefs.push(ref);
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+
+	// Sync the external inventory
+	try {
+		if (ref.type === 'player') {
+			await syncExternalPlayerInventory(ref.entityId, ref.name);
+		} else {
+			await syncExternalClaimInventory(ref.entityId, ref.name);
+		}
+	} catch (e) {
+		console.error(`Failed to sync external inventory for ${externalRefId}:`, e);
+		// Don't throw - the ref is saved, sync can be retried later
+	}
+}
+
+/**
+ * Remove an external inventory reference from a list
+ */
+export async function removeExternalRefFromList(
+	listId: string,
+	externalRefId: string
+): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list || !list.externalInventoryRefs) return;
+
+	// Parse the externalRefId
+	const [type, entityId] = externalRefId.split(':');
+	if (!type || !entityId) return;
+
+	// Remove the reference
+	list.externalInventoryRefs = list.externalInventoryRefs.filter(
+		(r) => !(r.type === type && r.entityId === entityId)
+	);
+	list.updatedAt = Date.now();
+
+	// Remove sources from enabledSourceIds
+	const sourcesToRemove = getExternalSourcesByRef(externalRefId);
+	list.enabledSourceIds = list.enabledSourceIds.filter(
+		(id) => !sourcesToRemove.some((s) => s.id === id)
+	);
+
+	await saveList(toPlainList(list));
+
+	// Check if any other list uses this external ref
+	const otherListsUsingRef = crafting.lists.some(
+		(l) =>
+			l.id !== listId &&
+			l.externalInventoryRefs?.some((r) => r.type === type && r.entityId === entityId)
+	);
+
+	// Only remove sources from cache if no other list uses them
+	if (!otherListsUsingRef) {
+		await removeExternalSources(externalRefId);
+	}
+}
+
+/**
+ * Sync all external inventories for a list
+ */
+export async function syncExternalInventoriesForList(listId: string): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list || !list.externalInventoryRefs?.length) return;
+
+	for (const ref of list.externalInventoryRefs) {
+		try {
+			if (ref.type === 'player') {
+				await syncExternalPlayerInventory(ref.entityId, ref.name);
+			} else {
+				await syncExternalClaimInventory(ref.entityId, ref.name);
+			}
+			// Update lastFetched on the ref
+			ref.lastFetched = Date.now();
+		} catch (e) {
+			console.error(`Failed to sync external ${ref.type} ${ref.entityId}:`, e);
+			// Continue with other refs
+		}
+	}
+
+	// Persist updated timestamps
+	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
+
+/**
+ * Check if an external inventory reference is stale
+ */
+export function isExternalRefStale(ref: ExternalInventoryRef, autoRefreshMinutes: number): boolean {
+	if (!ref.lastFetched) return true;
+	if (autoRefreshMinutes === 0) return false;
+
+	const staleThreshold = autoRefreshMinutes * 60 * 1000;
+	return Date.now() - ref.lastFetched > staleThreshold;
+}
+
+/**
+ * Get external refs that are stale for a list
+ */
+export function getStaleExternalRefs(
+	listId: string,
+	autoRefreshMinutes: number
+): ExternalInventoryRef[] {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list || !list.externalInventoryRefs?.length) return [];
+
+	return list.externalInventoryRefs.filter((ref) =>
+		isExternalRefStale(ref, autoRefreshMinutes)
+	);
 }
 
 /**

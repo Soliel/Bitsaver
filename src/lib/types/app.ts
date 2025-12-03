@@ -49,6 +49,16 @@ export interface CraftingList {
 	shareExpiresAt?: number; // Expiration timestamp (if shared)
 	createdAt: number;
 	updatedAt: number;
+	externalInventoryRefs?: ExternalInventoryRef[]; // External players/claims for this list
+}
+
+// Reference to an external player or claim inventory
+export interface ExternalInventoryRef {
+	type: 'player' | 'claim';
+	entityId: string; // Player ID or Claim ID
+	name: string; // Display name (player username or claim name)
+	addedAt: number; // When this external ref was added
+	lastFetched?: number; // Last time inventory was fetched
 }
 
 // Legacy: Item in a crafting list (for migration)

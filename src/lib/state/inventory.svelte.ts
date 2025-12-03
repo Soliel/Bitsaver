@@ -20,14 +20,18 @@ import {
 	saveSourceCargos,
 	getAllCachedInventoryItems,
 	getAllCachedInventoryCargos,
-	deleteSource as deleteCachedSource
+	deleteSource as deleteCachedSource,
+	deleteSourcesByExternalRef,
+	getCachedSourcesByExternalRef
 } from '$lib/services/cache';
 import {
 	fetchPlayerInventory,
 	fetchClaimInventories,
 	fetchClaimDetails,
 	parseBuildingInventory,
-	parsePlayerInventory
+	parsePlayerInventory,
+	parseExternalPlayerInventory,
+	parseExternalBuildingInventory
 } from '$lib/services/api/inventory';
 import { settings, updateInventorySyncTime, isInventoryStale } from './settings.svelte';
 
@@ -630,3 +634,217 @@ export function allocateMaterials(
 
 	return allocations;
 }
+
+// ============================================================================
+// External Inventory Management
+// ============================================================================
+
+/**
+ * State for tracking external inventory sync status
+ */
+export const externalSyncState = $state({
+	syncing: new Set<string>(), // externalRefId currently syncing
+	errors: new Map<string, string>() // externalRefId -> error message
+});
+
+/**
+ * Sync external player inventory
+ * Returns the sources that were synced
+ */
+export async function syncExternalPlayerInventory(
+	playerId: string,
+	playerName: string
+): Promise<InventorySource[]> {
+	const externalRefId = `player:${playerId}`;
+	externalSyncState.syncing.add(externalRefId);
+	externalSyncState.errors.delete(externalRefId);
+
+	try {
+		const response = await fetchPlayerInventory(playerId);
+		const { sources, items, cargos } = parseExternalPlayerInventory(
+			response.inventories || [],
+			playerId,
+			playerName
+		);
+
+		// Merge sources (preserve enabled state)
+		for (const newSource of sources) {
+			const existingIndex = inventory.sources.findIndex((s) => s.id === newSource.id);
+
+			if (existingIndex >= 0) {
+				// Preserve enabled state
+				newSource.enabled = inventory.sources[existingIndex].enabled;
+				inventory.sources[existingIndex] = newSource;
+			} else {
+				inventory.sources.push(newSource);
+			}
+
+			// Update items
+			inventory.items.set(newSource.id, items.filter((i) => i.sourceId === newSource.id));
+			// Update cargos
+			inventory.cargos.set(newSource.id, cargos.filter((c) => c.sourceId === newSource.id));
+		}
+
+		// Persist to cache
+		await saveSources(sources);
+		for (const source of sources) {
+			const sourceItems = items.filter((i) => i.sourceId === source.id);
+			await saveSourceItems(source.id, sourceItems);
+			const sourceCargos = cargos.filter((c) => c.sourceId === source.id);
+			await saveSourceCargos(source.id, sourceCargos);
+		}
+
+		return sources;
+	} catch (e) {
+		const errorMsg = e instanceof Error ? e.message : 'Failed to sync external player inventory';
+		externalSyncState.errors.set(externalRefId, errorMsg);
+		console.error(`Failed to sync external player inventory for ${playerId}:`, e);
+		throw e;
+	} finally {
+		externalSyncState.syncing.delete(externalRefId);
+	}
+}
+
+/**
+ * Sync external claim inventory
+ * Returns the sources that were synced
+ */
+export async function syncExternalClaimInventory(
+	claimId: string,
+	claimName: string
+): Promise<InventorySource[]> {
+	const externalRefId = `claim:${claimId}`;
+	externalSyncState.syncing.add(externalRefId);
+	externalSyncState.errors.delete(externalRefId);
+
+	try {
+		// Get all building inventories
+		const response = await fetchClaimInventories(claimId);
+
+		const newSources: InventorySource[] = [];
+		const newItems: SourcedItem[] = [];
+		const newCargos: SourcedCargo[] = [];
+
+		for (const building of response.buildings) {
+			const { source, items, cargos } = parseExternalBuildingInventory(
+				building,
+				claimId,
+				claimName
+			);
+
+			// Check if source already exists and preserve enabled state
+			const existingSource = inventory.sources.find((s) => s.id === source.id);
+			if (existingSource) {
+				source.enabled = existingSource.enabled;
+			}
+
+			newSources.push(source);
+			newItems.push(...items);
+			newCargos.push(...cargos);
+		}
+
+		// Update state
+		for (const source of newSources) {
+			const existingIndex = inventory.sources.findIndex((s) => s.id === source.id);
+
+			if (existingIndex >= 0) {
+				inventory.sources[existingIndex] = source;
+			} else {
+				inventory.sources.push(source);
+			}
+
+			inventory.items.set(
+				source.id,
+				newItems.filter((i) => i.sourceId === source.id)
+			);
+			inventory.cargos.set(
+				source.id,
+				newCargos.filter((c) => c.sourceId === source.id)
+			);
+		}
+
+		// Persist to cache
+		await saveSources(newSources);
+		for (const source of newSources) {
+			const sourceItems = newItems.filter((i) => i.sourceId === source.id);
+			await saveSourceItems(source.id, sourceItems);
+			const sourceCargos = newCargos.filter((c) => c.sourceId === source.id);
+			await saveSourceCargos(source.id, sourceCargos);
+		}
+
+		return newSources;
+	} catch (e) {
+		const errorMsg = e instanceof Error ? e.message : 'Failed to sync external claim inventory';
+		externalSyncState.errors.set(externalRefId, errorMsg);
+		console.error(`Failed to sync external claim inventory for ${claimId}:`, e);
+		throw e;
+	} finally {
+		externalSyncState.syncing.delete(externalRefId);
+	}
+}
+
+/**
+ * Remove all sources for an external reference
+ */
+export async function removeExternalSources(externalRefId: string): Promise<void> {
+	// Remove from state
+	const sourcesToRemove = inventory.sources.filter((s) => s.externalRefId === externalRefId);
+
+	for (const source of sourcesToRemove) {
+		inventory.sources = inventory.sources.filter((s) => s.id !== source.id);
+		inventory.items.delete(source.id);
+		inventory.cargos.delete(source.id);
+	}
+
+	// Remove from cache
+	await deleteSourcesByExternalRef(externalRefId);
+
+	// Clear any error state
+	externalSyncState.errors.delete(externalRefId);
+}
+
+/**
+ * Get sources for a specific external reference
+ */
+export function getExternalSourcesByRef(externalRefId: string): InventorySource[] {
+	return inventory.sources.filter((s) => s.externalRefId === externalRefId);
+}
+
+/**
+ * Get all external sources grouped by their reference
+ */
+export const externalSourcesByRef = {
+	get value() {
+		const groups = new Map<string, InventorySource[]>();
+
+		for (const source of inventory.sources) {
+			if (source.isExternal && source.externalRefId) {
+				const group = groups.get(source.externalRefId) || [];
+				group.push(source);
+				groups.set(source.externalRefId, group);
+			}
+		}
+
+		return groups;
+	}
+};
+
+/**
+ * Get only local (non-external) sources grouped by claim
+ */
+export const localSourcesByClaim = {
+	get value() {
+		const groups = new Map<string, InventorySource[]>();
+
+		for (const source of inventory.sources) {
+			if (!source.isExternal) {
+				const claimId = source.claimId || 'player';
+				const group = groups.get(claimId) || [];
+				group.push(source);
+				groups.set(claimId, group);
+			}
+		}
+
+		return groups;
+	}
+};
