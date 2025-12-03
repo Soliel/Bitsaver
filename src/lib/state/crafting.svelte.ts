@@ -449,13 +449,21 @@ function computeRemainingNeeds(
 			return;
 		}
 
-		// Handle building nodes - no inventory tracking, always need to build
+		// Handle building nodes - no inventory tracking, but can be checked off
 		if (node.nodeType === 'building') {
-			// Buildings always need to be constructed (no inventory)
+			// If building is checked off, treat as fully satisfied
+			const isCheckedOff = checkedOff?.has(nodeKey) ?? false;
+
 			const existing = needs.get(nodeKey) || { baseRequired: 0, remaining: 0 };
 			existing.baseRequired += neededQuantity;
-			existing.remaining += neededQuantity; // Always need full amount
+			existing.remaining += isCheckedOff ? 0 : neededQuantity;
 			needs.set(nodeKey, existing);
+
+			// If checked off, children are satisfied - record coverage for descendants
+			if (isCheckedOff) {
+				recordCoverageForDescendants(node, nodeKey, neededQuantity);
+				return;
+			}
 
 			// Process children (item and cargo requirements)
 			for (const child of node.children) {

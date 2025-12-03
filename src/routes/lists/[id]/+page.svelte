@@ -815,6 +815,7 @@
 	async function handleEntryQuantityChange(entryId: string, quantity: number) {
 		if (!list) return;
 		await updateEntryQuantity(list.id, entryId, quantity);
+		await calculateRequirements();
 	}
 
 	function openSourceModal() {
@@ -1504,7 +1505,18 @@
 								No items yet. Click + Add to get started.
 							</div>
 						{:else}
-							{#each list.entries as entry, i (entry.id)}
+							{@const visibleEntries = hideCompleted
+								? list.entries.filter((e) => {
+									const key = isItemEntry(e)
+										? `item-${e.itemId}`
+										: isCargoEntry(e)
+											? `cargo-${e.cargoId}`
+											: `building-${e.constructionRecipeId}`;
+									const have = manualHave.get(key) ?? 0;
+									return !checkedOff.has(key) && have < e.quantity;
+								})
+								: list.entries}
+							{#each visibleEntries as entry, i (entry.id)}
 								{@const entryKey = isItemEntry(entry)
 									? `item-${entry.itemId}`
 									: isCargoEntry(entry)
@@ -1520,7 +1532,6 @@
 								{@const haveQty = manualHave.get(entryKey) ?? 0}
 								{@const isComplete = checkedOff.has(entryKey) || haveQty >= entry.quantity}
 								{@const isStriped = settings.stripedRows && i % 2 === 1}
-								{#if !hideCompleted || !isComplete}
 									<div
 										class="hover:bg-gray-750 flex items-center gap-3 px-4 py-2 {isComplete ? 'opacity-50' : ''}"
 										style:background-color={isStriped ? 'rgba(55, 65, 81, 0.8)' : undefined}
@@ -1753,7 +1764,6 @@
 											</button>
 										</div>
 									</div>
-								{/if}
 							{/each}
 						{/if}
 					</div>
