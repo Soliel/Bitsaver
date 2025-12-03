@@ -146,9 +146,10 @@
 		if (!listId || !progressLoaded) return;
 		if (saveTimeout) clearTimeout(saveTimeout);
 		saveTimeout = setTimeout(async () => {
-			// Convert string-keyed maps to separate item and cargo arrays for storage
+			// Convert string-keyed maps to separate item, cargo, and building arrays for storage
 			const itemManualHave: [number, number][] = [];
 			const cargoManualHave: [number, number][] = [];
+			const buildingManualHave: [number, number][] = [];
 			for (const [key, qty] of manualHave) {
 				if (key.startsWith('item-')) {
 					const itemId = parseInt(key.substring(5), 10);
@@ -156,10 +157,14 @@
 				} else if (key.startsWith('cargo-')) {
 					const cargoId = parseInt(key.substring(6), 10);
 					if (!isNaN(cargoId)) cargoManualHave.push([cargoId, qty]);
+				} else if (key.startsWith('building-')) {
+					const buildingId = parseInt(key.substring(9), 10);
+					if (!isNaN(buildingId)) buildingManualHave.push([buildingId, qty]);
 				}
 			}
 			const itemCheckedOff: number[] = [];
 			const cargoCheckedOff: number[] = [];
+			const buildingCheckedOff: number[] = [];
 			for (const key of checkedOff) {
 				if (key.startsWith('item-')) {
 					const itemId = parseInt(key.substring(5), 10);
@@ -167,6 +172,9 @@
 				} else if (key.startsWith('cargo-')) {
 					const cargoId = parseInt(key.substring(6), 10);
 					if (!isNaN(cargoId)) cargoCheckedOff.push(cargoId);
+				} else if (key.startsWith('building-')) {
+					const buildingId = parseInt(key.substring(9), 10);
+					if (!isNaN(buildingId)) buildingCheckedOff.push(buildingId);
 				}
 			}
 			// Serialize recipe preferences
@@ -176,8 +184,10 @@
 				listId,
 				manualHave: itemManualHave,
 				manualHaveCargo: cargoManualHave,
+				manualHaveBuilding: buildingManualHave,
 				checkedOff: itemCheckedOff,
 				checkedOffCargo: cargoCheckedOff,
+				checkedOffBuilding: buildingCheckedOff,
 				recipePreferences: recipePrefsArray,
 				hideCompleted,
 				viewMode,
@@ -456,6 +466,12 @@
 					newManualHave.set(`cargo-${cargoId}`, qty);
 				}
 			}
+			// Also load building manual have if present
+			if (progress.manualHaveBuilding) {
+				for (const [buildingId, qty] of progress.manualHaveBuilding) {
+					newManualHave.set(`building-${buildingId}`, qty);
+				}
+			}
 			manualHave = newManualHave;
 
 			const newCheckedOff = new Set<string>();
@@ -466,6 +482,12 @@
 			if (progress.checkedOffCargo) {
 				for (const cargoId of progress.checkedOffCargo) {
 					newCheckedOff.add(`cargo-${cargoId}`);
+				}
+			}
+			// Also load building checked off if present
+			if (progress.checkedOffBuilding) {
+				for (const buildingId of progress.checkedOffBuilding) {
+					newCheckedOff.add(`building-${buildingId}`);
 				}
 			}
 			checkedOff = newCheckedOff;
