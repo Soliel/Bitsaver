@@ -64,6 +64,8 @@ export interface Recipe {
 	toolRequirements: ToolRequirement[];
 	// Pre-computed cost (from material_costs.json)
 	cost?: number;
+	// Number of crafting actions required to complete one craft
+	actionsRequired?: number;
 }
 
 export interface RecipeIngredient {
@@ -215,6 +217,8 @@ export interface FlatMaterial {
 	tier: number;
 	step: number; // 1 = raw/gathered materials, 2+ = crafted from previous step
 	profession: string; // Profession/skill required to craft (e.g., "Woodcutting", "Carpentry")
+	actionsRequired?: number; // Number of crafting actions per craft (from recipe)
+	outputQuantity?: number; // How many items produced per craft (from recipe)
 }
 
 // Pre-computed material costs data (from material_costs.json)

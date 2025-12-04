@@ -94,6 +94,7 @@ export interface MaterialRequirement extends FlatMaterial {
 	isComplete: boolean;   // remaining === 0
 	parentContributions?: ParentContribution[]; // Coverage from parent items in inventory
 	rootContributions?: RootItemContribution[]; // DEV: breakdown by list item
+	effort?: number;       // Total remaining effort = actionsRequired × crafts needed
 }
 
 // Grouped materials by tier for display

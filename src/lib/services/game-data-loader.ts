@@ -4,7 +4,7 @@
  */
 
 // Bump this version when data loading logic changes to force cache refresh
-export const DATA_LOADER_VERSION = 16;
+export const DATA_LOADER_VERSION = 17;
 
 import type {
 	Item,
@@ -45,6 +45,7 @@ interface RawItem {
 interface RawRecipe {
 	id: number;
 	name: string;
+	actions_required?: number;
 	building_requirement?: {
 		building_type: number;
 		tier: number;
@@ -587,7 +588,8 @@ function parseRecipes(
 			ingredients,
 			cargoIngredients: cargoIngredients.length > 0 ? cargoIngredients : undefined,
 			levelRequirements,
-			toolRequirements
+			toolRequirements,
+			actionsRequired: raw.actions_required
 		};
 
 		// Add to map grouped by output item ID
@@ -729,7 +731,8 @@ function parseCargoRecipes(
 			ingredients,
 			cargoIngredients: cargoIngredients.length > 0 ? cargoIngredients : undefined,
 			levelRequirements,
-			toolRequirements
+			toolRequirements,
+			actionsRequired: raw.actions_required
 		};
 
 		// Add to map grouped by output cargo ID

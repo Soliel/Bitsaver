@@ -131,6 +131,8 @@
 	// Uses string keys to support both items ("item-123") and cargo ("cargo-456")
 	let manualHave = $state<Map<string, number>>(new Map()); // materialKey -> manual quantity
 	let checkedOff = $state<Set<string>>(new Set()); // materialKey -> manually marked complete
+	// Track previous baseRequired values to detect changes and auto-uncheck
+	let prevBaseRequired = $state<Map<string, number>>(new Map()); // materialKey -> previous baseRequired
 	// Legacy number-keyed maps for backwards compatibility with saved progress
 	let legacyManualHave = $state<Map<number, number>>(new Map()); // itemId -> manual quantity (legacy)
 	let legacyCheckedOff = $state<Set<number>>(new Set()); // itemId -> manually complete (legacy)
@@ -355,6 +357,11 @@
 			const have = manualHave.get(key) ?? 0;
 			return checkedOff.has(key) || have >= entry.quantity;
 		}).length;
+	});
+
+	// Total remaining effort for the entire list
+	const totalListEffort = $derived.by(() => {
+		return requirements.reduce((sum, mat) => sum + (mat.effort ?? 0), 0);
 	});
 
 	function toggleSection(section: string) {
@@ -639,7 +646,53 @@
 			}
 
 			// checkedOff is already a Set<string> with keys like 'item-123', 'cargo-456'
-			requirements = await calculateListRequirements(list.id, itemManualHave, checkedOff, recipePreferences);
+			const newRequirements = await calculateListRequirements(list.id, itemManualHave, checkedOff, recipePreferences);
+
+			// Build set of final craft keys (list entries) - these should NOT be auto-unchecked
+			const finalCraftKeys = new Set<string>();
+			for (const entry of list.entries) {
+				if (isItemEntry(entry)) {
+					finalCraftKeys.add(`item-${entry.itemId}`);
+				} else if (isCargoEntry(entry)) {
+					finalCraftKeys.add(`cargo-${entry.cargoId}`);
+				} else if (isBuildingEntry(entry)) {
+					finalCraftKeys.add(`building-${entry.constructionRecipeId}`);
+				}
+			}
+
+			// Auto-uncheck materials whose baseRequired changed (excluding final crafts)
+			let checkedOffChanged = false;
+			const newCheckedOff = new Set(checkedOff);
+			for (const mat of newRequirements) {
+				const matKey = getMaterialKey(mat);
+				const prevRequired = prevBaseRequired.get(matKey);
+
+				// If this material is checked off, not a final craft, and its requirement changed, uncheck it
+				if (
+					checkedOff.has(matKey) &&
+					!finalCraftKeys.has(matKey) &&
+					prevRequired !== undefined &&
+					prevRequired !== mat.baseRequired
+				) {
+					newCheckedOff.delete(matKey);
+					checkedOffChanged = true;
+				}
+			}
+
+			// Update checkedOff if any were auto-unchecked
+			if (checkedOffChanged) {
+				checkedOff = newCheckedOff;
+				scheduleProgressSave();
+			}
+
+			// Update prevBaseRequired for next comparison
+			const newPrevBaseRequired = new Map<string, number>();
+			for (const mat of newRequirements) {
+				newPrevBaseRequired.set(getMaterialKey(mat), mat.baseRequired);
+			}
+			prevBaseRequired = newPrevBaseRequired;
+
+			requirements = newRequirements;
 			stepGroups = groupRequirementsByStep(requirements);
 			professionGroups = groupRequirementsByProfession(requirements);
 			combinedGroups = groupRequirementsByStepWithProfessions(requirements);
@@ -710,6 +763,15 @@
 		if (qty >= 10000) return `${(qty / 1000).toFixed(1)}K`;
 		if (qty >= 1000) return qty.toLocaleString();
 		return qty.toString();
+	}
+
+	// Format effort for display
+	function formatEffort(effort: number | undefined): string {
+		if (effort === undefined || effort === 0) return '';
+		if (effort >= 1000000) return `${(effort / 1000000).toFixed(1)}M`;
+		if (effort >= 10000) return `${(effort / 1000).toFixed(1)}K`;
+		if (effort >= 1000) return effort.toLocaleString();
+		return effort.toString();
 	}
 
 	// Get the best default recipe for an item
@@ -1215,6 +1277,14 @@
 		{#if lastSyncMessage}
 			<div class="rounded-lg bg-green-900/50 px-4 py-2 text-sm text-green-300">
 				{lastSyncMessage}
+			</div>
+		{/if}
+
+		<!-- Total Effort Summary (Top) -->
+		{#if totalListEffort > 0}
+			<div class="flex items-center justify-between rounded-lg bg-gray-800 px-4 py-2">
+				<span class="text-sm text-gray-400">Total Remaining Effort:</span>
+				<span class="text-lg font-semibold tabular-nums text-cyan-400">{formatEffort(totalListEffort)}</span>
 			</div>
 		{/if}
 
@@ -1769,6 +1839,14 @@
 					</div>
 				{/if}
 			</div>
+
+			<!-- Total Effort Summary (Bottom) -->
+			{#if totalListEffort > 0}
+				<div class="flex items-center justify-between rounded-lg bg-gray-800 px-4 py-2">
+					<span class="text-sm text-gray-400">Total Remaining Effort:</span>
+					<span class="text-lg font-semibold tabular-nums text-cyan-400">{formatEffort(totalListEffort)}</span>
+				</div>
+			{/if}
 		</div>
 	</div>
 
@@ -2753,6 +2831,17 @@
 						{formatQty(mat.baseRequired)}
 					</span>
 				</div>
+				<!-- Effort display -->
+				{#if mat.effort !== undefined && mat.effort > 0}
+					<span
+						class="w-14 flex-shrink-0 text-right text-xs text-cyan-400 tabular-nums"
+						title="{mat.actionsRequired ?? 0} actions per craft"
+					>
+						{formatEffort(mat.effort)}
+					</span>
+				{:else}
+					<span class="w-14 flex-shrink-0"></span>
+				{/if}
 				<div class="h-5 w-5 flex-shrink-0">
 					{#if isComplete}
 						<svg

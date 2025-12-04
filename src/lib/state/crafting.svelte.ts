@@ -1509,7 +1509,9 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 							quantity: node.quantity,
 							tier: node.tier,
 							step: step,
-							profession: profession
+							profession: profession,
+							actionsRequired: node.recipeUsed?.actionsRequired,
+							outputQuantity: node.recipeUsed?.outputQuantity
 						},
 						minStep: step
 					});
@@ -1524,6 +1526,7 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 							tier: node.tier,
 							step: step,
 							profession: profession
+							// Buildings don't have actionsRequired (construction is different)
 						},
 						minStep: step
 					});
@@ -1536,7 +1539,9 @@ export function flattenMaterialTree(tree: MaterialNode): FlatMaterial[] {
 							quantity: node.quantity,
 							tier: node.tier,
 							step: step,
-							profession: profession
+							profession: profession,
+							actionsRequired: node.recipeUsed?.actionsRequired,
+							outputQuantity: node.recipeUsed?.outputQuantity
 						},
 						minStep: step
 					});
@@ -1842,6 +1847,14 @@ export async function calculateListRequirements(
 		// e.g., if you have Rough Planks, that "covers" some Wood requirement
 		const effectiveHave = baseRequired - remaining;
 
+		// Calculate effort: actionsRequired × crafts needed (for remaining items)
+		let effort: number | undefined = undefined;
+		if (flatMat.actionsRequired !== undefined && remaining > 0) {
+			const outputQty = flatMat.outputQuantity || 1;
+			const craftsNeeded = Math.ceil(remaining / outputQty);
+			effort = flatMat.actionsRequired * craftsNeeded;
+		}
+
 		result.push({
 			...flatMat,
 			quantity: flatMat.quantity, // Base quantity from full tree
@@ -1850,7 +1863,8 @@ export async function calculateListRequirements(
 			have: effectiveHave, // Effective amount covered (including propagation)
 			isComplete: remaining === 0,
 			parentContributions: aggregateContributions(materialKey),
-			rootContributions: import.meta.env.DEV ? rootContributions.get(materialKey) : undefined
+			rootContributions: import.meta.env.DEV ? rootContributions.get(materialKey) : undefined,
+			effort
 		});
 	}
 
