@@ -42,12 +42,13 @@
 		getConstructionRecipeById,
 		getBuildingDescriptionById,
 		searchItems,
+		searchCargos,
 		findRecipesForItem,
 		findRecipesForCargo,
 		searchConstructionRecipes
 	} from '$lib/state/game-data.svelte';
-	import type { ConstructionRecipe } from '$lib/types/game';
-	import { addItemToList, addBuildingToList } from '$lib/state/crafting.svelte';
+	import type { ConstructionRecipe, Cargo } from '$lib/types/game';
+	import { addItemToList, addBuildingToList, addCargoToList } from '$lib/state/crafting.svelte';
 	import { getListProgress, saveListProgress } from '$lib/services/cache';
 	import { getItemIconUrl } from '$lib/utils/icons';
 	import RecipePopover from '$lib/components/RecipePopover.svelte';
@@ -390,12 +391,13 @@
 		scheduleProgressSave();
 	}
 
-	// Item/Building search for adding
-	type SearchTab = 'items' | 'buildings';
+	// Item/Building/Cargo search for adding
+	type SearchTab = 'items' | 'buildings' | 'cargo';
 	let searchTab = $state<SearchTab>('items');
 	let searchQuery = $state('');
 	let searchResults = $state<ReturnType<typeof searchItems>>([]);
 	let buildingSearchResults = $state<ConstructionRecipe[]>([]);
+	let cargoSearchResults = $state<Cargo[]>([]);
 	let showAddModal = $state(false);
 	let searchInputEl = $state<HTMLInputElement | null>(null);
 	let itemQuantities = $state<Map<number, number>>(new Map());
@@ -403,6 +405,8 @@
 	let recentlyAdded = $state<Map<number, boolean>>(new Map()); // itemId -> show checkmark
 	let buildingQuantities = $state<Map<number, number>>(new Map()); // constructionRecipeId -> quantity
 	let recentlyAddedBuildings = $state<Map<number, boolean>>(new Map()); // constructionRecipeId -> show checkmark
+	let cargoQuantities = $state<Map<number, number>>(new Map()); // cargoId -> quantity
+	let recentlyAddedCargo = $state<Map<number, boolean>>(new Map()); // cargoId -> show checkmark
 
 	// Focus search input when add modal opens
 	$effect(() => {
@@ -708,9 +712,11 @@
 		if (query.length >= 2) {
 			searchResults = searchItems(query, 50);
 			buildingSearchResults = searchConstructionRecipes(query, 50);
+			cargoSearchResults = searchCargos(query, 50);
 		} else {
 			searchResults = [];
 			buildingSearchResults = [];
+			cargoSearchResults = [];
 		}
 	}
 
@@ -846,17 +852,60 @@
 		}, 1500);
 	}
 
+	// Cargo quantity helpers
+	function getCargoQuantity(cargoId: number): number {
+		return cargoQuantities.get(cargoId) ?? 1;
+	}
+
+	function setCargoQuantity(cargoId: number, quantity: number) {
+		const newMap = new Map(cargoQuantities);
+		newMap.set(cargoId, Math.max(1, quantity));
+		cargoQuantities = newMap;
+	}
+
+	function handleCargoQuantityWheel(cargoId: number, event: WheelEvent) {
+		event.preventDefault();
+		const currentQty = getCargoQuantity(cargoId);
+		const delta = event.deltaY < 0 ? 1 : -1;
+		setCargoQuantity(cargoId, currentQty + delta);
+	}
+
+	function isCargoRecentlyAdded(cargoId: number): boolean {
+		return recentlyAddedCargo.get(cargoId) ?? false;
+	}
+
+	async function handleAddCargo(cargoId: number) {
+		if (!list) return;
+		const quantity = getCargoQuantity(cargoId);
+		await addCargoToList(list.id, cargoId, quantity);
+
+		// Show checkmark animation
+		const newAdded = new Map(recentlyAddedCargo);
+		newAdded.set(cargoId, true);
+		recentlyAddedCargo = newAdded;
+
+		// Reset checkmark after delay
+		setTimeout(() => {
+			const resetAdded = new Map(recentlyAddedCargo);
+			resetAdded.delete(cargoId);
+			recentlyAddedCargo = resetAdded;
+		}, 1500);
+	}
+
 	function closeAddModal() {
 		showAddModal = false;
 		searchTab = 'items';
 		searchQuery = '';
 		searchResults = [];
 		buildingSearchResults = [];
+		cargoSearchResults = [];
 		itemQuantities = new Map();
 		itemRecipes = new Map();
 		recentlyAdded = new Map();
 		buildingQuantities = new Map();
 		recentlyAddedBuildings = new Map();
+		cargoQuantities = new Map();
+		recentlyAddedCargo = new Map();
 	}
 
 	async function handleRemoveItem(itemId: number) {
@@ -1909,6 +1958,18 @@
 							<span class="ml-1 text-xs">({buildingSearchResults.length})</span>
 						{/if}
 					</button>
+					<button
+						type="button"
+						onclick={() => (searchTab = 'cargo')}
+						class="flex-1 px-4 py-2 text-sm font-medium transition-colors {searchTab === 'cargo'
+							? 'border-b-2 border-blue-500 text-blue-400'
+							: 'text-gray-400 hover:text-white'}"
+					>
+						Cargo
+						{#if cargoSearchResults.length > 0}
+							<span class="ml-1 text-xs">({cargoSearchResults.length})</span>
+						{/if}
+					</button>
 				</div>
 
 				<!-- Search -->
@@ -1918,7 +1979,7 @@
 						type="text"
 						value={searchQuery}
 						oninput={(e) => handleSearch(e.currentTarget.value)}
-						placeholder={searchTab === 'items' ? 'Search items by name...' : 'Search buildings by name...'}
+						placeholder={searchTab === 'items' ? 'Search items by name...' : searchTab === 'buildings' ? 'Search buildings by name...' : 'Search cargo by name...'}
 						class="w-full rounded-lg border border-gray-600 bg-gray-700 px-4 py-3 text-lg text-white placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
 					/>
 					{#if searchQuery.length > 0 && searchQuery.length < 2}
@@ -2056,7 +2117,7 @@
 						{:else}
 							<p class="py-8 text-center text-gray-400">Start typing to search for items</p>
 						{/if}
-					{:else}
+					{:else if searchTab === 'buildings'}
 						<!-- Buildings Tab -->
 						{#if buildingSearchResults.length > 0}
 							<div class="space-y-2">
@@ -2163,6 +2224,97 @@
 							<p class="py-8 text-center text-gray-400">No buildings found matching "{searchQuery}"</p>
 						{:else}
 							<p class="py-8 text-center text-gray-400">Start typing to search for buildings</p>
+						{/if}
+					{:else}
+						<!-- Cargo Tab -->
+						{#if cargoSearchResults.length > 0}
+							<div class="space-y-2">
+								{#each cargoSearchResults as cargo (cargo.id)}
+									{@const cargoIconUrl = cargo.iconAssetName ? getItemIconUrl(cargo.iconAssetName) : null}
+									{@const isInList = list?.entries.some((e) => isCargoEntry(e) && e.cargoId === cargo.id)}
+									<div class="rounded-lg bg-gray-700 p-3">
+										<div class="flex items-center gap-3">
+											<!-- Icon -->
+											<div class="flex h-10 w-10 items-center justify-center rounded bg-gray-600">
+												{#if cargoIconUrl}
+													<img src={cargoIconUrl} alt="" class="h-8 w-8 object-contain" />
+												{:else}
+													<span class="text-lg text-gray-400">?</span>
+												{/if}
+											</div>
+
+											<!-- Cargo info -->
+											<div class="min-w-0 flex-1">
+												<p class="truncate font-medium text-white">{cargo.name}</p>
+												<p class="text-xs text-gray-400">
+													{cargo.tag || 'Cargo'} · T{cargo.tier}
+													{#if isInList}
+														<span class="ml-2 text-green-400">In list</span>
+													{/if}
+												</p>
+											</div>
+
+											<!-- Quantity and Add -->
+											<div class="flex items-center gap-2">
+												<input
+													type="number"
+													value={getCargoQuantity(cargo.id)}
+													onchange={(e) =>
+														setCargoQuantity(cargo.id, parseInt(e.currentTarget.value) || 1)}
+													onwheel={(e) => handleCargoQuantityWheel(cargo.id, e)}
+													min="1"
+													class="w-20 rounded border border-gray-600 bg-gray-800 px-2 py-1.5 text-center text-white focus:border-blue-500 focus:outline-none"
+												/>
+												<button
+													type="button"
+													onclick={() => handleAddCargo(cargo.id)}
+													class="rounded-lg px-3 py-1.5 text-white transition-all duration-300 {isCargoRecentlyAdded(
+														cargo.id
+													)
+														? 'bg-green-600'
+														: 'bg-blue-600 hover:bg-blue-700'}"
+													title={isCargoRecentlyAdded(cargo.id) ? 'Added!' : 'Add to list'}
+													aria-label={isCargoRecentlyAdded(cargo.id) ? 'Added to list' : 'Add to list'}
+												>
+													{#if isCargoRecentlyAdded(cargo.id)}
+														<svg
+															class="h-5 w-5"
+															fill="none"
+															stroke="currentColor"
+															viewBox="0 0 24 24"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																stroke-width="2"
+																d="M5 13l4 4L19 7"
+															/>
+														</svg>
+													{:else}
+														<svg
+															class="h-5 w-5"
+															fill="none"
+															stroke="currentColor"
+															viewBox="0 0 24 24"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																stroke-width="2"
+																d="M12 4v16m8-8H4"
+															/>
+														</svg>
+													{/if}
+												</button>
+											</div>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{:else if searchQuery.length >= 2}
+							<p class="py-8 text-center text-gray-400">No cargo found matching "{searchQuery}"</p>
+						{:else}
+							<p class="py-8 text-center text-gray-400">Start typing to search for cargo</p>
 						{/if}
 					{/if}
 				</div>
