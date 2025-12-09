@@ -348,13 +348,19 @@ function getNodeId(node: MaterialNode): number {
  * @param haveItems - Map of itemId -> quantity you have
  * @param haveCargo - Map of cargoId -> quantity you have
  * @param checkedOff - Set of material keys (e.g., 'item-123', 'cargo-456') that are manually marked complete
+ * @param usePackages - Whether to use packages from inventory to satisfy material requirements
+ * @param unpackRecipes - Map of itemId -> recipes that can unpack Package cargo into that item
+ * @param finishedGoodKeys - Set of material keys for list entries (finished goods won't use packages)
  * Returns: needs map and parent contributions map
  */
 function computeRemainingNeeds(
 	trees: MaterialNode[],
 	haveItems: Map<number, number>,
 	haveCargo: Map<number, number>,
-	checkedOff?: Set<string>
+	checkedOff?: Set<string>,
+	usePackages?: boolean,
+	unpackRecipes?: Map<number, Recipe[]>,
+	finishedGoodKeys?: Set<string>
 ): ComputeRemainingNeedsResult {
 	const needs = new Map<string, { baseRequired: number; remaining: number }>();
 	const parentContributions = new Map<string, Array<{ parentNodeKey: string; parentQuantityUsed: number; coverage: number }>>();
@@ -494,7 +500,42 @@ function computeRemainingNeeds(
 		}
 
 		// Remaining after using inventory
-		const stillNeeded = neededQuantity - useFromInventory;
+		let stillNeeded = neededQuantity - useFromInventory;
+
+		// Check if packages can satisfy remaining need (only for non-finished-goods)
+		if (usePackages && unpackRecipes && stillNeeded > 0 && !isCheckedOff && !finishedGoodKeys?.has(nodeKey)) {
+			const itemUnpackRecipes = unpackRecipes.get(itemId);
+			if (itemUnpackRecipes) {
+				for (const recipe of itemUnpackRecipes) {
+					if (stillNeeded <= 0) break;
+					// Get the package cargo from the recipe's cargo ingredients
+					const packageIngredient = recipe.cargoIngredients?.[0];
+					if (!packageIngredient) continue;
+
+					const packageCargoId = packageIngredient.cargoId;
+					const packageHave = haveCargo.get(packageCargoId) || 0;
+					const packageUsed = usedCargoInventory.get(packageCargoId) || 0;
+					const packageAvailable = Math.max(0, packageHave - packageUsed);
+
+					if (packageAvailable > 0) {
+						// Each unpack produces recipe.outputQuantity items per packageIngredient.quantity packages
+						const itemsPerPackage = recipe.outputQuantity / packageIngredient.quantity;
+						const itemsFromPackages = packageAvailable * itemsPerPackage;
+						const useFromPackages = Math.min(itemsFromPackages, stillNeeded);
+
+						if (useFromPackages > 0) {
+							// Calculate how many packages we'll consume
+							const packagesToUse = Math.ceil(useFromPackages / itemsPerPackage);
+							usedCargoInventory.set(packageCargoId, packageUsed + packagesToUse);
+							stillNeeded -= useFromPackages;
+
+							// Record contribution from package
+							recordContribution(nodeKey, `cargo-${packageCargoId}`, packagesToUse, useFromPackages);
+						}
+					}
+				}
+			}
+		}
 
 		// Aggregate base requirements and remaining needs
 		const existing = needs.get(nodeKey) || { baseRequired: 0, remaining: 0 };
@@ -1048,6 +1089,20 @@ export async function updateListAutoRefresh(listId: string, enabled: boolean): P
 
 	list.autoRefreshEnabled = enabled;
 	list.updatedAt = Date.now();
+	await saveList(toPlainList(list));
+}
+
+/**
+ * Update use packages setting for a list
+ */
+export async function updateListUsePackages(listId: string, usePackages: boolean): Promise<void> {
+	const list = crafting.lists.find((l) => l.id === listId);
+	if (!list) return;
+
+	list.usePackages = usePackages;
+	list.updatedAt = Date.now();
+	// Clear tree cache since package usage changes affect calculations
+	listTreeCache.delete(listId);
 	await saveList(toPlainList(list));
 }
 
@@ -1710,8 +1765,28 @@ export async function calculateListRequirements(
 		haveCargo.set(cargoId, agg.totalQuantity);
 	}
 
+	// Build set of finished good keys (list entries that shouldn't use packages to satisfy themselves)
+	const finishedGoodKeys = new Set<string>();
+	for (const entry of list.entries) {
+		if (isItemEntry(entry)) {
+			finishedGoodKeys.add(`item-${entry.itemId}`);
+		} else if (isCargoEntry(entry)) {
+			finishedGoodKeys.add(`cargo-${entry.cargoId}`);
+		} else {
+			finishedGoodKeys.add(`building-${entry.constructionRecipeId}`);
+		}
+	}
+
 	// Compute remaining needs by propagating inventory through the tree
-	const { needs, parentContributions: rawContributions } = computeRemainingNeeds(trees, haveItems, haveCargo, checkedOff);
+	const { needs, parentContributions: rawContributions } = computeRemainingNeeds(
+		trees,
+		haveItems,
+		haveCargo,
+		checkedOff,
+		list.usePackages,
+		gameData.unpackRecipes,
+		finishedGoodKeys
+	);
 
 	// Track root contributions for each material (DEV only)
 	const rootContributions = new Map<string, RootItemContribution[]>();

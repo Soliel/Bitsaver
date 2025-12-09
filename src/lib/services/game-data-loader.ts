@@ -4,7 +4,7 @@
  */
 
 // Bump this version when data loading logic changes to force cache refresh
-export const DATA_LOADER_VERSION = 17;
+export const DATA_LOADER_VERSION = 18;
 
 import type {
 	Item,
@@ -280,6 +280,7 @@ export async function loadAllGameData(): Promise<{
 	recipes: Map<number, Recipe[]>;
 	cargoRecipes: Map<number, Recipe[]>;
 	extractionRecipes: Map<number, Recipe[]>;
+	unpackRecipes: Map<number, Recipe[]>;
 	cargoToSkill: Map<number, string>;
 	itemToCargoSkill: Map<number, string>;
 	itemFromListToSkill: Map<number, string>;
@@ -328,6 +329,9 @@ export async function loadAllGameData(): Promise<{
 	// Parse extraction recipes
 	const extractionRecipes = parseExtractionRecipes(rawExtractionRecipes, skills, toolTypes);
 
+	// Parse unpack recipes (recipes that unpack Package cargo into items)
+	const unpackRecipes = parseUnpackRecipes(rawRecipes, skills, toolTypes, buildingTypes, rawCargos);
+
 	// Build cargoToSkill mapping: cargo_id -> skill_name
 	// First, build from gathering/extraction (resource yields)
 	const cargoToSkill = buildCargoToSkillMap(rawResources, rawCargos, rawExtractionRecipes, skills);
@@ -359,7 +363,7 @@ export async function loadAllGameData(): Promise<{
 		mergeMaterialCosts(items, recipes, materialCosts);
 	}
 
-	return { items, cargos, recipes, cargoRecipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, skills, toolTypes, buildingTypes, constructionRecipes, buildingDescriptions };
+	return { items, cargos, recipes, cargoRecipes, extractionRecipes, unpackRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, skills, toolTypes, buildingTypes, constructionRecipes, buildingDescriptions };
 }
 
 /**
@@ -742,6 +746,118 @@ function parseCargoRecipes(
 	}
 
 	return recipesByCargo;
+}
+
+/**
+ * Parse "unpack" recipes - recipes where the only cargo inputs are Package cargo
+ * These produce items from Package cargo and are used when usePackages is enabled.
+ * Grouped by output item ID so we can look up "what packages can produce this item?"
+ */
+function parseUnpackRecipes(
+	rawRecipes: RawRecipe[],
+	skills: Map<number, SkillInfo>,
+	toolTypes: Map<number, ToolTypeInfo>,
+	buildingTypes: Map<number, BuildingTypeInfo>,
+	rawCargos: RawCargo[]
+): Map<number, Recipe[]> {
+	const unpackRecipesByItem = new Map<number, Recipe[]>();
+
+	// Build cargo lookup for identifying Package cargo
+	const cargoById = new Map<number, RawCargo>();
+	for (const c of rawCargos) {
+		cargoById.set(c.id, c);
+	}
+
+	for (const raw of rawRecipes) {
+		// Skip recipes with no output
+		if (!raw.crafted_item_stacks || raw.crafted_item_stacks.length === 0) {
+			continue;
+		}
+
+		// Only consider Item outputs
+		const outputStack = raw.crafted_item_stacks.find((s) => s.item_type === 'Item');
+		if (!outputStack) {
+			continue;
+		}
+
+		// Parse cargo ingredients
+		const cargoIngredients: CargoIngredient[] = (raw.consumed_item_stacks || [])
+			.filter((s) => s.item_type === 'Cargo')
+			.map((s) => ({
+				cargoId: s.item_id,
+				quantity: s.quantity
+			}));
+
+		// Must have cargo ingredients and ALL must be Package type
+		if (cargoIngredients.length === 0) {
+			continue;
+		}
+
+		const allPackages = cargoIngredients.every((ci) => {
+			const cargo = cargoById.get(ci.cargoId);
+			return cargo?.tag === 'Package';
+		});
+
+		if (!allPackages) {
+			continue;
+		}
+
+		// This IS an unpack recipe - parse it fully
+		const ingredients: RecipeIngredient[] = (raw.consumed_item_stacks || [])
+			.filter((s) => s.item_type === 'Item')
+			.map((s) => ({
+				itemId: s.item_id,
+				quantity: s.quantity
+			}));
+
+		const levelRequirements: LevelRequirement[] = (raw.level_requirements || []).map((lr) => {
+			const skill = skills.get(lr.skill_id);
+			return {
+				level: lr.level,
+				skillId: lr.skill_id,
+				skillName: skill?.name || 'Unknown',
+				skillIcon: '',
+				skillTitle: skill?.title || ''
+			};
+		});
+
+		const toolRequirements: ToolRequirement[] = (raw.tool_requirements || []).map((tr) => {
+			const toolType = toolTypes.get(tr.tool_type);
+			return {
+				level: tr.level,
+				power: tr.power,
+				toolType: tr.tool_type,
+				name: toolType?.name || 'Unknown',
+				skillId: toolType?.skillId || 0
+			};
+		});
+
+		const buildingType = raw.building_requirement
+			? buildingTypes.get(raw.building_requirement.building_type)
+			: undefined;
+
+		const recipe: Recipe = {
+			id: raw.id,
+			name: raw.name,
+			outputItemId: outputStack.item_id,
+			outputQuantity: outputStack.quantity,
+			craftingStationId: raw.building_requirement?.building_type,
+			craftingStationName: buildingType?.name,
+			craftingStationTier: raw.building_requirement?.tier,
+			ingredients,
+			cargoIngredients,
+			levelRequirements,
+			toolRequirements,
+			actionsRequired: raw.actions_required
+		};
+
+		// Add to map grouped by output item ID
+		const existing = unpackRecipesByItem.get(recipe.outputItemId) || [];
+		existing.push(recipe);
+		unpackRecipesByItem.set(recipe.outputItemId, existing);
+	}
+
+	return unpackRecipesByItem;
 }
 
 /**

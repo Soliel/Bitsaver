@@ -11,6 +11,7 @@
 		updateEntryRecipe,
 		updateListSources,
 		updateListAutoRefresh,
+		updateListUsePackages,
 		updateListShare,
 		calculateListRequirements,
 		groupRequirementsByStep,
@@ -567,6 +568,13 @@
 		if (!list) return;
 		const newValue = list.autoRefreshEnabled === false;
 		await updateListAutoRefresh(list.id, newValue);
+	}
+
+	async function toggleUsePackages() {
+		if (!list) return;
+		await updateListUsePackages(list.id, !list.usePackages);
+		// Recalculate requirements after toggling
+		await calculateRequirements();
 	}
 
 	async function handleShare() {
@@ -1199,6 +1207,28 @@
 						<div
 							class="absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all {list.autoRefreshEnabled !==
 							false
+								? 'left-4'
+								: 'left-0.5'}"
+						></div>
+					</div>
+				</button>
+
+				<!-- Use Packages Toggle -->
+				<button
+					onclick={toggleUsePackages}
+					class="flex items-center gap-2 rounded-lg bg-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-600"
+					title={list.usePackages
+						? 'Using packages from inventory to satisfy material requirements'
+						: 'Packages in inventory will not be used as materials'}
+				>
+					<span class="text-gray-400">Use Packages</span>
+					<div
+						class="relative h-5 w-9 rounded-full transition-colors {list.usePackages
+							? 'bg-blue-600'
+							: 'bg-gray-600'}"
+					>
+						<div
+							class="absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all {list.usePackages
 								? 'left-4'
 								: 'left-0.5'}"
 						></div>

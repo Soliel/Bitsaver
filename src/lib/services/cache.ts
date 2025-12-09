@@ -783,6 +783,7 @@ export async function cacheAllGameData(
 	recipes: Map<number, Recipe[]>,
 	cargoRecipes: Map<number, Recipe[]>,
 	extractionRecipes: Map<number, Recipe[]>,
+	unpackRecipes: Map<number, Recipe[]>,
 	cargoToSkill: Map<number, string>,
 	itemToCargoSkill: Map<number, string>,
 	itemFromListToSkill: Map<number, string>,
@@ -838,6 +839,9 @@ export async function cacheAllGameData(
 
 	// Cache itemFromListToSkill as JSON in metadata
 	await cacheItemFromListToSkill(itemFromListToSkill);
+
+	// Cache unpackRecipes as JSON in metadata
+	await cacheUnpackRecipes(unpackRecipes);
 
 	// Store hash
 	await setGameDataHash(hash);
@@ -931,6 +935,34 @@ async function loadItemFromListToSkill(): Promise<Map<number, string>> {
 }
 
 /**
+ * Cache unpackRecipes mapping as JSON
+ */
+async function cacheUnpackRecipes(unpackRecipes: Map<number, Recipe[]>): Promise<void> {
+	const db = await getDB();
+	const entries = Array.from(unpackRecipes.entries());
+	await db.put('gameDataMeta', {
+		key: 'unpackRecipes',
+		hash: JSON.stringify(entries),
+		cachedAt: Date.now()
+	});
+}
+
+/**
+ * Load unpackRecipes mapping from cache
+ */
+async function loadUnpackRecipes(): Promise<Map<number, Recipe[]>> {
+	const db = await getDB();
+	const meta = await db.get('gameDataMeta', 'unpackRecipes');
+	if (!meta?.hash) return new Map();
+	try {
+		const entries = JSON.parse(meta.hash) as [number, Recipe[]][];
+		return new Map(entries);
+	} catch {
+		return new Map();
+	}
+}
+
+/**
  * Load all game data from cache
  */
 export async function loadAllGameDataFromCache(): Promise<{
@@ -939,6 +971,7 @@ export async function loadAllGameDataFromCache(): Promise<{
 	recipes: Map<number, Recipe[]>;
 	cargoRecipes: Map<number, Recipe[]>;
 	extractionRecipes: Map<number, Recipe[]>;
+	unpackRecipes: Map<number, Recipe[]>;
 	cargoToSkill: Map<number, string>;
 	itemToCargoSkill: Map<number, string>;
 	itemFromListToSkill: Map<number, string>;
@@ -984,9 +1017,10 @@ export async function loadAllGameDataFromCache(): Promise<{
 	const recipes = await getCachedRecipes();
 	const cargoRecipes = await getCachedCargoRecipes();
 	const extractionRecipes = await getCachedExtractionRecipes();
+	const unpackRecipes = await loadUnpackRecipes();
 	const cargoToSkill = await loadCargoToSkill();
 	const itemToCargoSkill = await loadItemToCargoSkill();
 	const itemFromListToSkill = await loadItemFromListToSkill();
 
-	return { items, cargos, recipes, cargoRecipes, extractionRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, constructionRecipes, buildingDescriptions };
+	return { items, cargos, recipes, cargoRecipes, extractionRecipes, unpackRecipes, cargoToSkill, itemToCargoSkill, itemFromListToSkill, constructionRecipes, buildingDescriptions };
 }
